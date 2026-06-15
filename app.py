@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import re
 import math
+import copy
 from collections import Counter
 import nltk
 from nltk.corpus import stopwords
@@ -14,6 +15,8 @@ import networkx as nx
 import yaml
 import streamlit_authenticator as stauth
 from yaml.loader import SafeLoader
+import os
+import json
 
 # ─── NLTK ─────────────────────────────────────────────────────
 @st.cache_resource
@@ -53,75 +56,54 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
-def load_config():
-    """
-    認証設定の読み込み（優先順位）
-      1. Google Colab Secrets  (PUBMED_APP_CONFIG)
-      2. Streamlit Cloud Secrets (st.secrets)
-      3. ローカルの config.yaml
-    """
-    # ── Colab 環境 ──────────────────────────────
-    try:
-        from google.colab import userdata
-        import json as _json
-        raw = userdata.get("PUBMED_APP_CONFIG")
-        if raw:
-            return _json.loads(raw)
-    except Exception:
-        pass
-
-    # ── Streamlit Cloud 環境 ────────────────────
+def get_auth_config():
+    cfg = None
+    # 1. Streamlit Cloud / ローカルの secrets 読み込み
     if "credentials" in st.secrets:
-        return {
+        cfg = {
             "credentials": dict(st.secrets["credentials"]),
             "cookie": dict(st.secrets["cookie"]),
         }
+    # 2. ローカル用 yaml (存在する場合)
+    elif os.path.exists("config.yaml"):
+        with open("config.yaml") as f:
+            cfg = yaml.load(f, Loader=SafeLoader)
+            
+    return copy.deepcopy(cfg) if cfg else None
 
-    # ── ローカル開発環境 ────────────────────────
-    with open("config.yaml") as f:
-        return yaml.load(f, Loader=SafeLoader)
+config = get_auth_config()
 
-config = load_config()
+if config:
+    authenticator = stauth.Authenticate(
+        config["credentials"],
+        config["cookie"]["name"],
+        config["cookie"]["key"],
+        config["cookie"]["expiry_days"],
+    )
+else:
+    st.error("認証設定が見つかりません。")
+    st.stop()
 
-authenticator = stauth.Authenticate(
-    config["credentials"],
-    config["cookie"]["name"],
-    config["cookie"]["key"],
-    config["cookie"]["expiry_days"],
-)
-
-# 1. ログインウィジェットの表示
+# ログインウィジェットの表示
 authenticator.login("main")
 
-# 2. 認証状態の確認
-if st.session_state["authentication_status"]:
-    # ログイン成功時の処理
-    name = st.session_state["name"]
-    username = st.session_state["username"]
-    auth_status = True
+# 認証状態の判定（ここが重要）
+if st.session_state["authentication_status"] is True:
+    # ログイン成功時
+    st.sidebar.markdown(f"👤 **{st.session_state['name']}** さん")
+    authenticator.logout("ログアウト", "sidebar", key="unique_logout_btn")
     
-    # サイドバーにログアウトボタン等を表示
-    authenticator.logout("ログアウト", "sidebar")
-    
-elif st.session_state["authentication_status"] is False:
-    st.error("ユーザー名またはパスワードが間違っています")
-    auth_status = False
-    
-elif st.session_state["authentication_status"] is None:
-    st.warning("ユーザー名とパスワードを入力してください")
-    auth_status = None
-    st.stop()
+    # 以下の処理をログイン成功時のみ実行させるため、ここから下の処理をインデントします
+    # (既存の「MEDLINE パーサー」以降のコードをここに含めるか、
+    #  あるいは「if st.session_state["authentication_status"] is True:」を
+    #  認証ブロックの直後に配置して、アプリ全体を囲ってください)
 
-if auth_status is False:
+elif st.session_state["authentication_status"] is False:
     st.error("ユーザー名またはパスワードが正しくありません")
     st.stop()
-elif auth_status is None:
-    st.info("ユーザー名とパスワードを入力してください")
+elif st.session_state["authentication_status"] is None:
+    st.warning("ユーザー名とパスワードを入力してください")
     st.stop()
-
-authenticator.logout("ログアウト", "sidebar", key="unique_logout_button")
-st.sidebar.markdown(f"👤 **{name}** さん")
-st.sidebar.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════
 # MEDLINE パーサー
