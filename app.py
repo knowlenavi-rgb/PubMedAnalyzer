@@ -90,7 +90,7 @@ authenticator = stauth.Authenticate(
     config["cookie"]["expiry_days"],
 )
 
-name, auth_status, username = authenticator.login("ログイン", "main")
+name, auth_status, username = authenticator.login("main")
 
 if auth_status is False:
     st.error("ユーザー名またはパスワードが正しくありません")
