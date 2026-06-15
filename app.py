@@ -56,11 +56,9 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
+# ─── 認証設定の読み込み (エラー回避版) ──────────────────────────
 def get_auth_config():
-    # 既存の読み込みロジックを以下のように整理してください
     if "credentials" in st.secrets:
-        # dict() でキャストすることで、読み取り専用の Secrets 構造から
-        # 通常の書き込み可能な辞書へ変換されます
         return {
             "credentials": dict(st.secrets["credentials"]),
             "cookie": dict(st.secrets["cookie"]),
@@ -71,37 +69,53 @@ def get_auth_config():
     return None
 
 config = get_auth_config()
-
-if config:
-    authenticator = stauth.Authenticate(
-        config["credentials"],
-        config["cookie"]["name"],
-        config["cookie"]["key"],
-        config["cookie"]["expiry_days"],
-    )
-else:
+if not config:
     st.error("認証設定が見つかりません。")
     st.stop()
 
-# ログインウィジェットの表示
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+# ─── ログイン・メイン処理 ────────────────────────────────────
 authenticator.login("main")
 
-# 認証状態の判定（ここが重要）
-if st.session_state["authentication_status"] is True:
-    # ログイン成功時
-    st.sidebar.markdown(f"👤 **{st.session_state['name']}** さん")
-    authenticator.logout("ログアウト", "sidebar", key="unique_logout_btn")
+if st.session_state.get("authentication_status"):
+    # ─── ログイン成功時のサイドバー ───
+    st.sidebar.success(f"ようこそ, {st.session_state['name']} さん")
+    authenticator.logout("ログアウト", "sidebar", key="logout_btn")
     
-    # 以下の処理をログイン成功時のみ実行させるため、ここから下の処理をインデントします
-    # (既存の「MEDLINE パーサー」以降のコードをここに含めるか、
-    #  あるいは「if st.session_state["authentication_status"] is True:」を
-    #  認証ブロックの直後に配置して、アプリ全体を囲ってください)
+    # ─── 既存の解析ロジック開始 ────────────────────────────────
+    def parse_medline(text):
+        # (既存のパース関数をそのまま配置)
+        lines = text.splitlines()
+        records, current = [], {}
+        for line in lines:
+            if len(line) < 6: continue
+            tag, val = line[:4].strip(), line[6:].strip()
+            if tag == "PMID":
+                if current: records.append(current)
+                current = {"PMID": val}
+            else: current[tag] = val
+        if current: records.append(current)
+        return pd.DataFrame(records)
 
-elif st.session_state["authentication_status"] is False:
+    # 既存のアプリロジック (ページ遷移や解析など) をここに記述
+    page = st.sidebar.radio("ページ", ["Overview", "Analysis"])
+    if page == "Overview":
+        st.write("解析アプリへようこそ")
+        uploaded_file = st.file_uploader("MEDLINE形式データ", type=["txt"])
+        if uploaded_file:
+            st.session_state.df = parse_medline(uploaded_file.read().decode("utf-8", "ignore"))
+            st.write("データ読み込み完了")
+
+elif st.session_state.get("authentication_status") is False:
     st.error("ユーザー名またはパスワードが正しくありません")
-    st.stop()
-elif st.session_state["authentication_status"] is None:
-    st.warning("ユーザー名とパスワードを入力してください")
+elif st.session_state.get("authentication_status") is None:
+    st.warning("ログインしてください")
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════
