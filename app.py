@@ -111,7 +111,7 @@ elif st.session_state["authentication_status"] is None:
     st.warning("ユーザー名とパスワードを入力してください")
     auth_status = None
     st.stop()
-    
+
 if auth_status is False:
     st.error("ユーザー名またはパスワードが正しくありません")
     st.stop()
@@ -119,7 +119,7 @@ elif auth_status is None:
     st.info("ユーザー名とパスワードを入力してください")
     st.stop()
 
-authenticator.logout("ログアウト", "sidebar")
+authenticator.logout("ログアウト", "sidebar", key="unique_logout_button")
 st.sidebar.markdown(f"👤 **{name}** さん")
 st.sidebar.markdown("---")
 
