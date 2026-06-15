@@ -90,8 +90,28 @@ authenticator = stauth.Authenticate(
     config["cookie"]["expiry_days"],
 )
 
-name, auth_status, username = authenticator.login("main")
+# 1. ログインウィジェットの表示
+authenticator.login("main")
 
+# 2. 認証状態の確認
+if st.session_state["authentication_status"]:
+    # ログイン成功時の処理
+    name = st.session_state["name"]
+    username = st.session_state["username"]
+    auth_status = True
+    
+    # サイドバーにログアウトボタン等を表示
+    authenticator.logout("ログアウト", "sidebar")
+    
+elif st.session_state["authentication_status"] is False:
+    st.error("ユーザー名またはパスワードが間違っています")
+    auth_status = False
+    
+elif st.session_state["authentication_status"] is None:
+    st.warning("ユーザー名とパスワードを入力してください")
+    auth_status = None
+    st.stop()
+    
 if auth_status is False:
     st.error("ユーザー名またはパスワードが正しくありません")
     st.stop()
