@@ -41,6 +41,20 @@ st.markdown("""
     h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.3rem; }
     h3 { color: #34495e; }
     div[data-testid="stForm"] { max-width: 400px; margin: auto; }
+    /* タブを大きく・目立つように */
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"] {
+        font-size: 1rem !important;
+        font-weight: 600 !important;
+        padding: 10px 18px !important;
+    }
+    div[data-baseweb="tab-list"] {
+        gap: 4px;
+        border-bottom: 2px solid #e0e6ed;
+    }
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] {
+        border-bottom: 3px solid #3498db !important;
+        color: #3498db !important;
+    }
     .kpi-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
     .kpi-card { background:#f8fafc; border-radius:8px; padding:12px 20px;
                 min-width:140px; text-align:center; border-top:4px solid #3498db; flex:1; }
@@ -56,7 +70,67 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
+# ─── 認証設定の読み込み (エラー回避版) ──────────────────────────
+def get_auth_config():
+    if "credentials" in st.secrets:
+        return {
+            "credentials": dict(st.secrets["credentials"]),
+            "cookie": dict(st.secrets["cookie"]),
+        }
+    elif os.path.exists("config.yaml"):
+        with open("config.yaml") as f:
+            return yaml.load(f, Loader=SafeLoader)
+    return None
 
+config = get_auth_config()
+if not config:
+    st.error("認証設定が見つかりません。")
+    st.stop()
+
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+# ─── ログイン・メイン処理 ────────────────────────────────────
+authenticator.login("main")
+
+if st.session_state.get("authentication_status"):
+    # ─── ログイン成功時のサイドバー ───
+    st.sidebar.success(f"ようこそ, {st.session_state['name']} さん")
+    authenticator.logout("ログアウト", "sidebar", key="logout_btn")
+    
+    # ─── 既存の解析ロジック開始 ────────────────────────────────
+    def parse_medline(text):
+        # (既存のパース関数をそのまま配置)
+        lines = text.splitlines()
+        records, current = [], {}
+        for line in lines:
+            if len(line) < 6: continue
+            tag, val = line[:4].strip(), line[6:].strip()
+            if tag == "PMID":
+                if current: records.append(current)
+                current = {"PMID": val}
+            else: current[tag] = val
+        if current: records.append(current)
+        return pd.DataFrame(records)
+
+    # 既存のアプリロジック (ページ遷移や解析など) をここに記述
+    page = st.sidebar.radio("ページ", ["Overview", "Analysis"])
+    if page == "Overview":
+        st.write("解析アプリへようこそ")
+        uploaded_file = st.file_uploader("MEDLINE形式データ", type=["txt"])
+        if uploaded_file:
+            st.session_state.df = parse_medline(uploaded_file.read().decode("utf-8", "ignore"))
+            st.write("データ読み込み完了")
+
+elif st.session_state.get("authentication_status") is False:
+    st.error("ユーザー名またはパスワードが正しくありません")
+elif st.session_state.get("authentication_status") is None:
+    st.warning("ログインしてください")
+    st.stop()
 
 # ═══════════════════════════════════════════════════════════════
 # MEDLINE パーサー
@@ -140,20 +214,29 @@ def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str):
     if result.empty:
         st.info("データが不足しています。")
         return
-    # 値の高い順に並べる
     result = result.sort_values("tfidf", ascending=True)
+    n_groups = result["group"].nunique()
+    row_h = 30  # 1行あたりの高さを大きく
     fig = px.bar(
         result, x="tfidf", y="term", color="group",
         facet_col="group", facet_col_wrap=2, orientation="h",
         labels={"tfidf": "TF-IDF", "term": ""}, title=title,
-        height=max(400, len(result) * 22),
+        height=max(480, len(result) * row_h + n_groups * 60),
     )
-    fig.update_yaxes(matches=None, showticklabels=True, categoryorder="total ascending")
-    fig.update_layout(showlegend=False)
-    # facetタイトル（group=Journal名）の文字を大きく・"group=" プレフィックスを除去
+    fig.update_yaxes(
+        matches=None, showticklabels=True,
+        categoryorder="total ascending",
+        tickfont=dict(size=13),   # ★ y軸（bigram）ラベルを大きく
+    )
+    fig.update_xaxes(tickfont=dict(size=12))
+    fig.update_layout(
+        showlegend=False,
+        title_font=dict(size=15),
+    )
+    # facetタイトルのプレフィックス除去 & フォント拡大
     fig.for_each_annotation(lambda a: a.update(
         text=a.text.split("=")[-1],
-        font=dict(size=14, color="#2c3e50"),
+        font=dict(size=15, color="#2c3e50"),
     ))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -522,22 +605,7 @@ elif page == "📊 Overview":
             yd = df.dropna(subset=["year"]).copy()
             yd["year"] = yd["year"].astype(int)
             y_min, y_max = int(yd["year"].min()), int(yd["year"].max())
-            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max))
-            bd = (yd[yd["year"].between(yr[0], yr[1])]
-                  .groupby("year").size().reset_index(name="count"))
-            fig = px.bar(bd, x="year", y="count", color_discrete_sequence=["#3498db"],
-                         labels={"year": "Year", "count": "文献数"},
-                         title=f"文献数推移（{yr[0]}〜{yr[1]}）")
-            fig.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig, use_container_width=True)
-            st.download_button("⬇️ literature_count.csv",
-                               bd.to_csv(index=False).encode(),
-                               "literature_count.csv", "text/csv")
-
-    # ── Tab2: Journalランキング（全期間）────────────────────────
-    with tab2:
-        if "TA" in df.columns:
-            TOP_J = st.slider("表示件数", 10, 30, 20, key="ov_topj_n")
+            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max), key="ov_yr_slider")
             jdf = df.dropna(subset=["TA"]).copy()
             top_j = jdf["TA"].value_counts().head(TOP_J).reset_index()
             top_j.columns = ["Journal", "総文献数"]
@@ -621,22 +689,7 @@ elif page == "📊 Overview":
             yd = df.dropna(subset=["year"]).copy()
             yd["year"] = yd["year"].astype(int)
             y_min, y_max = int(yd["year"].min()), int(yd["year"].max())
-            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max))
-            bd = (yd[yd["year"].between(yr[0], yr[1])]
-                  .groupby("year").size().reset_index(name="count"))
-            fig = px.bar(bd, x="year", y="count", color_discrete_sequence=["#3498db"],
-                         labels={"year": "Year", "count": "文献数"},
-                         title=f"文献数推移（{yr[0]}〜{yr[1]}）")
-            fig.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig, use_container_width=True)
-            st.download_button("⬇️ literature_count.csv",
-                               bd.to_csv(index=False).encode(),
-                               "literature_count.csv", "text/csv")
-
-    # ── Tab2: Top Journals（全期間 Top20 グラフ）─────────────────
-    with tab2:
-        if "TA" in df.columns:
-            TOP_J = st.slider("表示件数", 10, 30, 20, key="topj_n")
+            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max), key="du_yr_slider")
             jdf = df.dropna(subset=["TA"]).copy()
             top_j = jdf["TA"].value_counts().head(TOP_J).reset_index()
             top_j.columns = ["Journal", "総文献数"]
@@ -916,21 +969,22 @@ elif page == "🔥 ホットキーワード":
                 compare_rows = []
                 for label, years in w_periods:
                     texts_w = df[df["year"].isin(years)]["AB"].dropna().tolist()
-                    with cr2:
-                        st.markdown(f"##### {label}　（Abstract {len(texts_w)} 件）")
                     if not texts_w:
                         with cr2:
-                            st.warning("この期間のデータがありません。")
+                            st.warning(f"{label}：この期間のデータがありません。")
                         continue
-                    with st.spinner(f"{label} 単語共起ネットワーク構築中..."):
-                        G_w = build_bigram_graph(texts_w, top_n=top_edges)
-                        fig_w = nx_to_plotly(
-                            G_w, centrality=cent_w,
-                            title=f"単語共起ネットワーク [bigram]　{label}",
-                            directed=True, show_labels=True,
-                        )
+                    # ★ spinner と plotly_chart を同じ cr2 コンテキスト内で実行
                     with cr2:
+                        st.markdown(f"##### {label}　（Abstract {len(texts_w)} 件）")
+                        with st.spinner(f"{label} 単語共起ネットワーク構築中..."):
+                            G_w = build_bigram_graph(texts_w, top_n=top_edges)
+                            fig_w = nx_to_plotly(
+                                G_w, centrality=cent_w,
+                                title=f"単語共起ネットワーク [bigram]　{label}",
+                                directed=True, show_labels=True,
+                            )
                         st.plotly_chart(fig_w, use_container_width=True)
+
                     if G_w.nodes:
                         scores = (nx.pagerank(G_w, weight="weight") if cent_w == "pagerank"
                                   else nx.betweenness_centrality(G_w, weight="weight"))
@@ -1104,9 +1158,15 @@ elif page == "👤 著者分析":
             top_comm_n = st.slider("コミュニティ表示数", 3, 8, 5, key="co_comm_n")
             top_feat_n = st.slider("特徴語表示数", 5, 15, 8, key="co_feat_n")
             span_net   = st.slider("期間比較（年数）", 2, 5, 3, key="co_span")
-            run_co     = st.button("🔍 分析実行", key="co_run")
+            run_co     = st.button("🔄 再実行（設定変更後）", key="co_run")
 
-        if run_co:
+        # ★ デフォルト自動表示：初回ロード時もネットワークを描画する
+        if "co_network_done" not in st.session_state:
+            st.session_state.co_network_done = False
+        do_run = run_co or not st.session_state.co_network_done
+
+        if do_run:
+            st.session_state.co_network_done = True
             with st.spinner("共著ネットワークを構築中..."):
                 G_co = build_coauthor_graph(df["FAU"], top_n=top_n_co)
 
