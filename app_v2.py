@@ -70,67 +70,7 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
-# ─── 認証設定の読み込み (エラー回避版) ──────────────────────────
-def get_auth_config():
-    if "credentials" in st.secrets:
-        return {
-            "credentials": dict(st.secrets["credentials"]),
-            "cookie": dict(st.secrets["cookie"]),
-        }
-    elif os.path.exists("config.yaml"):
-        with open("config.yaml") as f:
-            return yaml.load(f, Loader=SafeLoader)
-    return None
 
-config = get_auth_config()
-if not config:
-    st.error("認証設定が見つかりません。")
-    st.stop()
-
-authenticator = stauth.Authenticate(
-    config["credentials"],
-    config["cookie"]["name"],
-    config["cookie"]["key"],
-    config["cookie"]["expiry_days"],
-)
-
-# ─── ログイン・メイン処理 ────────────────────────────────────
-authenticator.login("main")
-
-if st.session_state.get("authentication_status"):
-    # ─── ログイン成功時のサイドバー ───
-    st.sidebar.success(f"ようこそ, {st.session_state['name']} さん")
-    authenticator.logout("ログアウト", "sidebar", key="logout_btn")
-    
-    # ─── 既存の解析ロジック開始 ────────────────────────────────
-    def parse_medline(text):
-        # (既存のパース関数をそのまま配置)
-        lines = text.splitlines()
-        records, current = [], {}
-        for line in lines:
-            if len(line) < 6: continue
-            tag, val = line[:4].strip(), line[6:].strip()
-            if tag == "PMID":
-                if current: records.append(current)
-                current = {"PMID": val}
-            else: current[tag] = val
-        if current: records.append(current)
-        return pd.DataFrame(records)
-
-    # 既存のアプリロジック (ページ遷移や解析など) をここに記述
-    page = st.sidebar.radio("ページ", ["Overview", "Analysis"])
-    if page == "Overview":
-        st.write("解析アプリへようこそ")
-        uploaded_file = st.file_uploader("MEDLINE形式データ", type=["txt"])
-        if uploaded_file:
-            st.session_state.df = parse_medline(uploaded_file.read().decode("utf-8", "ignore"))
-            st.write("データ読み込み完了")
-
-elif st.session_state.get("authentication_status") is False:
-    st.error("ユーザー名またはパスワードが正しくありません")
-elif st.session_state.get("authentication_status") is None:
-    st.warning("ログインしてください")
-    st.stop()
 
 # ═══════════════════════════════════════════════════════════════
 # MEDLINE パーサー
