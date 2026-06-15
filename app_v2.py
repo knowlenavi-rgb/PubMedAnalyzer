@@ -56,67 +56,7 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
-# ─── 認証設定の読み込み (エラー回避版) ──────────────────────────
-def get_auth_config():
-    if "credentials" in st.secrets:
-        return {
-            "credentials": dict(st.secrets["credentials"]),
-            "cookie": dict(st.secrets["cookie"]),
-        }
-    elif os.path.exists("config.yaml"):
-        with open("config.yaml") as f:
-            return yaml.load(f, Loader=SafeLoader)
-    return None
 
-config = get_auth_config()
-if not config:
-    st.error("認証設定が見つかりません。")
-    st.stop()
-
-authenticator = stauth.Authenticate(
-    config["credentials"],
-    config["cookie"]["name"],
-    config["cookie"]["key"],
-    config["cookie"]["expiry_days"],
-)
-
-# ─── ログイン・メイン処理 ────────────────────────────────────
-authenticator.login("main")
-
-if st.session_state.get("authentication_status"):
-    # ─── ログイン成功時のサイドバー ───
-    st.sidebar.success(f"ようこそ, {st.session_state['name']} さん")
-    authenticator.logout("ログアウト", "sidebar", key="logout_btn")
-    
-    # ─── 既存の解析ロジック開始 ────────────────────────────────
-    def parse_medline(text):
-        # (既存のパース関数をそのまま配置)
-        lines = text.splitlines()
-        records, current = [], {}
-        for line in lines:
-            if len(line) < 6: continue
-            tag, val = line[:4].strip(), line[6:].strip()
-            if tag == "PMID":
-                if current: records.append(current)
-                current = {"PMID": val}
-            else: current[tag] = val
-        if current: records.append(current)
-        return pd.DataFrame(records)
-
-    # 既存のアプリロジック (ページ遷移や解析など) をここに記述
-    page = st.sidebar.radio("ページ", ["Overview", "Analysis"])
-    if page == "Overview":
-        st.write("解析アプリへようこそ")
-        uploaded_file = st.file_uploader("MEDLINE形式データ", type=["txt"])
-        if uploaded_file:
-            st.session_state.df = parse_medline(uploaded_file.read().decode("utf-8", "ignore"))
-            st.write("データ読み込み完了")
-
-elif st.session_state.get("authentication_status") is False:
-    st.error("ユーザー名またはパスワードが正しくありません")
-elif st.session_state.get("authentication_status") is None:
-    st.warning("ログインしてください")
-    st.stop()
 
 # ═══════════════════════════════════════════════════════════════
 # MEDLINE パーサー
@@ -396,11 +336,18 @@ if "df" not in st.session_state:
 # ═══════════════════════════════════════════════════════════════
 # ナビゲーション
 # ═══════════════════════════════════════════════════════════════
-PAGES = ["🏠 Home", "📂 Data Upload", "📊 Overview",
-         "🔤 自然言語処理", "🕸️ ネットワーク分析", "🧬 MeSH分析"]
+PAGES = [
+    "🏠 Home",
+    "📂 Data Upload",
+    "📊 Overview",
+    "📰 Journal分析",
+    "🔥 ホットキーワード",
+    "🧬 MeSH分析",
+    "👤 著者分析",
+]
 page = st.sidebar.radio("ページ選択", PAGES)
 st.sidebar.markdown("---")
-st.sidebar.caption("PubMed文献解析アプリ v2.1")
+st.sidebar.caption("PubMed文献解析アプリ v2.2")
 
 df = st.session_state.df
 
@@ -408,38 +355,30 @@ df = st.session_state.df
 # HOME
 # ═══════════════════════════════════════════════════════════════
 if page == "🏠 Home":
-    st.markdown("# 📚 文献データ分析・可視化アプリケーション")
+    st.markdown("# 📚 PubMed 文献データ分析・可視化アプリケーション")
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("""
-**できること**
-- ✅ MEDLINE形式データのパース・概要確認
-- ✅ 整形データ（基本情報・Abstract・著者）のCSVダウンロード
-- ✅ 文献数推移・Top Journal（+Others）分析
-- ✅ Top Author ランキング（Co / 1st / Last）・著者推移バブルチャート
-- ✅ TF-IDF 特徴語抽出（Bigram主体）：Journal別・著者別・年度別
-- ✅ 共著ネットワーク（コミュニティ別特徴語・期間比較・新規共著ペア）
-- ✅ 単語共起ネットワーク（Bigram・3期間比較）
-- ✅ MeSHヒートマップ & バースト検知タイムライン
+**使い方**
+1. [PubMed](https://pubmed.ncbi.nlm.nih.gov/) で任意のキーワードで文献を検索
+2. **MEDLINE形式** でデータをダウンロード  
+   （Send to → Citation manager → Format: MEDLINE）
+3. 「📂 Data Upload」からファイルをアップロード
+4. 左のナビから目的のページを選んで分析
         """)
     with col2:
         st.markdown("""
-**使い方**
-1. [PubMed](https://pubmed.ncbi.nlm.nih.gov/) で任意のキーワードで文献を検索
-2. **MEDLINE形式** でデータをダウンロード（Send to → Citation manager → MEDLINE）
-3. 「📂 Data Upload」からファイルをアップロード
-4. 各ページで分析結果を確認・ダウンロード
-
 **ページ構成**
 
-| ページ | 内容 |
-|--------|------|
-| 📂 Data Upload | アップロード・データ概要・CSVダウンロード |
-| 📊 Overview | 文献数推移・Journal・Author・バブルチャート |
-| 🔤 自然言語処理 | TF-IDF Bigram特徴語（Journal/著者/年度別） |
-| 🕸️ ネットワーク分析 | 共著・コミュニティ・期間比較・単語共起 |
-| 🧬 MeSH分析 | ヒートマップ・バースト検知タイムライン |
+| ページ | 主な内容 |
+|--------|---------|
+| 📂 Data Upload | ファイル読込・基礎統計・CSV出力 |
+| 📊 Overview | 文献数推移・Journalランキング・著者ランキング・バブルチャート |
+| 📰 Journal分析 | Journal推移（積み上げ）・bigram特徴語・MeSH特徴語 |
+| 🔥 ホットキーワード | 年度別特徴語・単語共起ネットワーク（3期間） |
+| 🧬 MeSH分析 | MeSHヒートマップ・バースト検知タイムライン |
+| 👤 著者分析 | 著者別bigram・共著ネットワーク・コミュニティ・期間比較 |
         """)
     st.info("⬅️ 左のサイドバーから「📂 Data Upload」を選んでください。")
 
@@ -573,9 +512,108 @@ elif page == "📊 Overview":
         st.warning("先に「📂 Data Upload」でデータをアップロードしてください。")
         st.stop()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["📈 文献数推移", "📰 Top Journals", "📊 Journal推移", "👥 Top Authors", "🫧 著者推移"]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📈 文献数推移", "📰 Journalランキング", "👥 Top Authors", "🫧 著者推移"]
     )
+
+    # ── Tab1: 文献数推移 ─────────────────────────────────────────
+    with tab1:
+        if "year" in df.columns:
+            yd = df.dropna(subset=["year"]).copy()
+            yd["year"] = yd["year"].astype(int)
+            y_min, y_max = int(yd["year"].min()), int(yd["year"].max())
+            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max))
+            bd = (yd[yd["year"].between(yr[0], yr[1])]
+                  .groupby("year").size().reset_index(name="count"))
+            fig = px.bar(bd, x="year", y="count", color_discrete_sequence=["#3498db"],
+                         labels={"year": "Year", "count": "文献数"},
+                         title=f"文献数推移（{yr[0]}〜{yr[1]}）")
+            fig.update_layout(showlegend=False, height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            st.download_button("⬇️ literature_count.csv",
+                               bd.to_csv(index=False).encode(),
+                               "literature_count.csv", "text/csv")
+
+    # ── Tab2: Journalランキング（全期間）────────────────────────
+    with tab2:
+        if "TA" in df.columns:
+            TOP_J = st.slider("表示件数", 10, 30, 20, key="ov_topj_n")
+            jdf = df.dropna(subset=["TA"]).copy()
+            top_j = jdf["TA"].value_counts().head(TOP_J).reset_index()
+            top_j.columns = ["Journal", "総文献数"]
+            top_j_sorted = top_j.sort_values("総文献数", ascending=True)
+            fig_ja = px.bar(
+                top_j_sorted, x="総文献数", y="Journal", orientation="h",
+                color_discrete_sequence=["#2ecc71"],
+                title=f"Top {TOP_J} Journal（全期間・総文献数順）",
+            )
+            fig_ja.update_layout(
+                yaxis=dict(categoryorder="array",
+                           categoryarray=top_j_sorted["Journal"].tolist()),
+                height=max(400, TOP_J * 26),
+            )
+            st.plotly_chart(fig_ja, use_container_width=True)
+            st.dataframe(top_j.reset_index(drop=True), use_container_width=True)
+            st.download_button("⬇️ top_journals.csv",
+                               top_j.to_csv(index=False).encode(),
+                               "top_journals.csv", "text/csv")
+
+    # ── Tab3: Top Authors ────────────────────────────────────────
+    with tab3:
+        if "FAU" in df.columns:
+            TOP_AU = st.slider("表示著者数", 10, 30, 20, key="ov_top_au")
+            all_au, first_au, last_au = [], [], []
+            for authors in df["FAU"]:
+                if isinstance(authors, list) and authors:
+                    s = [shorten_name(a) for a in authors]
+                    all_au.extend(s); first_au.append(s[0]); last_au.append(s[-1])
+            co  = pd.DataFrame(Counter(all_au).most_common(TOP_AU),  columns=["Author", "Co-author数"])
+            fst = pd.DataFrame(Counter(first_au).most_common(TOP_AU), columns=["Author", "1st Author数"])
+            lst = pd.DataFrame(Counter(last_au).most_common(TOP_AU),  columns=["Author", "Last Author数"])
+            c1, c2, c3 = st.columns(3)
+            for col_st, data, xcol, clr, ttl in [
+                (c1, co,  "Co-author数",  "#e74c3c", f"Co-author Top{TOP_AU}"),
+                (c2, fst, "1st Author数", "#3498db", f"1st Author Top{TOP_AU}"),
+                (c3, lst, "Last Author数","#9b59b6", f"Last Author Top{TOP_AU}"),
+            ]:
+                with col_st:
+                    fig = px.bar(data, x=xcol, y="Author", orientation="h",
+                                 color_discrete_sequence=[clr], title=ttl, height=500)
+                    fig.update_layout(yaxis=dict(categoryorder="total ascending"))
+                    st.plotly_chart(fig, use_container_width=True)
+            st.markdown("#### 著者ランキング統合テーブル")
+            merged = (co.merge(fst, on="Author", how="outer")
+                        .merge(lst, on="Author", how="outer")
+                        .fillna(0)
+                        .sort_values("Co-author数", ascending=False)
+                        .head(TOP_AU).reset_index(drop=True))
+            st.dataframe(merged, use_container_width=True)
+
+    # ── Tab4: 著者バブル ────────────────────────────────────────
+    with tab4:
+        if "FAU" in df.columns and "year" in df.columns:
+            TOP_BB = st.slider("表示著者数", 10, 30, 20, key="ov_bb_n")
+            rows = [{"year": r["year"], "author": shorten_name(a)}
+                    for _, r in df.iterrows() for a in (r.get("FAU") or [])]
+            auyr = pd.DataFrame(rows).dropna()
+            auyr["year"] = auyr["year"].astype(int)
+            top_authors = auyr["author"].value_counts().head(TOP_BB).index.tolist()
+            bbl = (auyr[auyr["author"].isin(top_authors)]
+                   .groupby(["year", "author"]).size().reset_index(name="当年文献数"))
+            bbl = bbl.sort_values(["author", "year"])
+            bbl["累積文献数"] = bbl.groupby("author")["当年文献数"].cumsum()
+            bbl["hover"] = (bbl["author"] + "<br>当年: " + bbl["当年文献数"].astype(str)
+                            + " 件<br>累積: " + bbl["累積文献数"].astype(str) + " 件")
+            fig = px.scatter(
+                bbl, x="year", y="累積文献数", size="当年文献数", color="author",
+                hover_name="author", custom_data=["hover"], size_max=35, height=620,
+                labels={"year": "Year", "累積文献数": "累積文献数", "当年文献数": "当年文献数"},
+                title=f"著者別年次推移（Top {TOP_BB}）",
+            )
+            fig.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
+            fig.update_layout(legend=dict(font=dict(size=9)),
+                              yaxis_title="累積文献数（件）", xaxis_title="Year")
+            st.plotly_chart(fig, use_container_width=True)
 
     # ── Tab1: 文献数推移 ─────────────────────────────────────────
     with tab1:
@@ -714,12 +752,114 @@ elif page == "📊 Overview":
                               yaxis_title="累積文献数（件）", xaxis_title="Year")
             st.plotly_chart(fig, use_container_width=True)
 
+
 # ═══════════════════════════════════════════════════════════════
-# 自然言語処理（Bigram主体）
+# Journal分析
 # ═══════════════════════════════════════════════════════════════
-elif page == "🔤 自然言語処理":
-    st.markdown("## 自然言語処理（TF-IDF 特徴語抽出）")
-    st.caption("Bigramを主体としています。各グラフは値の高い順に上から並びます。")
+elif page == "📰 Journal分析":
+    st.markdown("## 📰 Journal分析")
+    if df is None:
+        st.warning("先に「📂 Data Upload」でデータをアップロードしてください。")
+        st.stop()
+
+    tab1, tab2, tab3 = st.tabs(["📊 Journal推移", "🔤 bigram特徴語", "🧬 MeSH特徴語"])
+
+    # ── Tab1: Journal推移（Top N + Others 積み上げ）──────────────
+    with tab1:
+        if "TA" not in df.columns or "year" not in df.columns:
+            st.error("TA または year 列が見つかりません。")
+        else:
+            TOP_STACK = st.slider("個別表示Journal数（残りはOthers）", 5, 20, 10, key="jnl_stack_n")
+            jdf2 = df.dropna(subset=["TA", "year"]).copy()
+            jdf2["year"] = jdf2["year"].astype(int)
+            top_list = jdf2["TA"].value_counts().head(TOP_STACK).index.tolist()
+            jdf2["TA_grp"] = jdf2["TA"].where(jdf2["TA"].isin(top_list), other="Others")
+            trend = jdf2.groupby(["year", "TA_grp"]).size().reset_index(name="count")
+            trend["year_str"] = trend["year"].astype(str)
+            year_order = [str(y) for y in sorted(trend["year"].unique())]
+            order = top_list + ["Others"]
+            trend["TA_grp"] = pd.Categorical(trend["TA_grp"], categories=order, ordered=True)
+            trend = trend.sort_values(["year", "TA_grp"])
+            palette = px.colors.qualitative.Plotly
+            color_map = {j: palette[i % len(palette)] for i, j in enumerate(top_list)}
+            color_map["Others"] = "#cccccc"
+            fig_stack = px.bar(
+                trend, x="year_str", y="count", color="TA_grp",
+                barmode="stack",
+                color_discrete_map=color_map,
+                category_orders={"year_str": year_order, "TA_grp": order},
+                labels={"count": "文献数", "year_str": "Year", "TA_grp": "Journal"},
+                title=f"Top {TOP_STACK} Journal + Others 年別推移",
+                height=520,
+            )
+            fig_stack.update_layout(
+                bargap=0.1,
+                xaxis=dict(tickangle=-45),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
+
+    # ── Tab2: Journal別 bigram特徴語 ────────────────────────────
+    with tab2:
+        if "TA" not in df.columns or "AB" not in df.columns:
+            st.error("TA または AB 列が見つかりません。")
+        else:
+            top_j_n = st.slider("対象Journal数", 3, 10, 6, key="jnl_j_n")
+            top_w   = st.slider("表示フレーズ数", 5, 20, 10, key="jnl_j_w")
+            jnlp = df.dropna(subset=["TA", "AB"]).copy()
+            top_jlist = jnlp["TA"].value_counts().head(top_j_n).index.tolist()
+            j_texts = {j: " ".join(jnlp[jnlp["TA"] == j]["AB"].tolist()) for j in top_jlist}
+            tfidf_chart(j_texts, top_w, "bigram", "Journal別 特徴語 (bigram / TF-IDF)")
+            with st.expander("単語（参考）"):
+                tfidf_chart(j_texts, top_w, "word", "Journal別 特徴語 (word / TF-IDF)")
+
+    # ── Tab3: Journal別 MeSH特徴語 ──────────────────────────────
+    with tab3:
+        if "TA" not in df.columns or "MH" not in df.columns:
+            st.error("TA または MH 列が見つかりません。")
+        else:
+            top_j_m = st.slider("対象Journal数", 3, 10, 6, key="jnl_mesh_n")
+            top_m_w = st.slider("表示MeSH数", 5, 20, 10, key="jnl_mesh_w")
+            jmesh = df.dropna(subset=["TA"]).copy()
+            jmesh = jmesh[jmesh["MH"].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+            top_jm = jmesh["TA"].value_counts().head(top_j_m).index.tolist()
+
+            rows_m = []
+            for _, row in jmesh[jmesh["TA"].isin(top_jm)].iterrows():
+                for m in row["MH"]:
+                    nm = normalize_mesh(m)
+                    if nm not in MESH_EXCLUDE:
+                        rows_m.append({"Journal": row["TA"], "mesh": nm})
+            if not rows_m:
+                st.info("MeSHデータが見つかりません。")
+            else:
+                mesh_df = pd.DataFrame(rows_m)
+                # Journal × MeSH のTF-IDF（MeSHをテキストとして扱う）
+                jm_texts = {j: " ".join(mesh_df[mesh_df["Journal"] == j]["mesh"].tolist())
+                            for j in top_jm}
+                # wordモードで渡す（MeSH自体がすでに句なのでbigramは不要）
+                result_m = tfidf_top(jm_texts, top_m_w, mode="word")
+                if result_m.empty:
+                    st.info("データが不足しています。")
+                else:
+                    result_m = result_m.sort_values("tfidf", ascending=True)
+                    fig_m = px.bar(
+                        result_m, x="tfidf", y="term", color="group",
+                        facet_col="group", facet_col_wrap=2, orientation="h",
+                        labels={"tfidf": "TF-IDF", "term": ""},
+                        title=f"Journal別 MeSH特徴語 Top{top_m_w}",
+                        height=max(400, len(result_m) * 22),
+                    )
+                    fig_m.update_yaxes(matches=None, showticklabels=True,
+                                       categoryorder="total ascending")
+                    fig_m.update_layout(showlegend=False)
+                    st.plotly_chart(fig_m, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════════
+# ホットキーワード
+# ═══════════════════════════════════════════════════════════════
+elif page == "🔥 ホットキーワード":
+    st.markdown("## 🔥 ホットキーワード")
     if df is None:
         st.warning("先にデータをアップロードしてください。")
         st.stop()
@@ -727,50 +867,23 @@ elif page == "🔤 自然言語処理":
         st.error("AB（Abstract）列が見つかりません。")
         st.stop()
 
-    tab1, tab2, tab3 = st.tabs(["📰 Journal別特徴語", "👤 著者別特徴語", "📅 年度別特徴語"])
+    tab1, tab2 = st.tabs(["📅 年度別特徴語", "💬 単語共起ネットワーク"])
 
-    # ── Tab1: Journal別 ─────────────────────────────────────────
+    # ── Tab1: 年度別 bigram特徴語 ────────────────────────────────
     with tab1:
-        if "TA" in df.columns:
-            top_j_n = st.slider("対象Journal数", 3, 10, 6, key="nlp_j_n")
-            top_w   = st.slider("表示フレーズ数", 5, 20, 10, key="nlp_j_w")
-            jnlp = df.dropna(subset=["TA", "AB"]).copy()
-            top6j = jnlp["TA"].value_counts().head(top_j_n).index.tolist()
-            j_texts = {j: " ".join(jnlp[jnlp["TA"] == j]["AB"].tolist()) for j in top6j}
-            st.markdown("#### Bigram（主）")
-            tfidf_chart(j_texts, top_w, "bigram", "Journal別 特徴語 (bigram / TF-IDF)")
-            with st.expander("単語（参考）"):
-                tfidf_chart(j_texts, top_w, "word", "Journal別 特徴語 (word / TF-IDF)")
-
-    # ── Tab2: 著者別 ─────────────────────────────────────────────
-    with tab2:
-        if "FAU" in df.columns:
-            top_a_n = st.slider("対象著者数", 3, 10, 6, key="nlp_a_n")
-            top_w2  = st.slider("表示フレーズ数", 5, 20, 10, key="nlp_a_w")
-            au_rows = [{"author": shorten_name(r["FAU"][0]), "AB": r["AB"]}
-                       for _, r in df.iterrows()
-                       if isinstance(r.get("FAU"), list) and r["FAU"] and pd.notna(r.get("AB"))]
-            au_df2 = pd.DataFrame(au_rows)
-            if not au_df2.empty:
-                top6a = au_df2["author"].value_counts().head(top_a_n).index.tolist()
-                a_texts = {a: " ".join(au_df2[au_df2["author"] == a]["AB"].tolist()) for a in top6a}
-                st.markdown("#### Bigram（主）")
-                tfidf_chart(a_texts, top_w2, "bigram", "著者別 特徴語 (bigram / TF-IDF)")
-                with st.expander("単語（参考）"):
-                    tfidf_chart(a_texts, top_w2, "word", "著者別 特徴語 (word / TF-IDF)")
-
-    # ── Tab3: 年度別 ─────────────────────────────────────────────
-    with tab3:
-        if "year" in df.columns:
-            SPAN   = st.slider("集約年数（1期間）", 1, 5, 3, key="nlp_span")
-            top_w3 = st.slider("表示フレーズ数", 5, 20, 10, key="nlp_y_w")
+        if "year" not in df.columns:
+            st.error("year 列が見つかりません。")
+        else:
+            SPAN   = st.slider("集約年数（1期間）", 1, 5, 3, key="hot_span")
+            top_w3 = st.slider("表示フレーズ数", 5, 20, 10, key="hot_y_w")
+            n_per  = st.slider("表示期間数", 2, 6, 4, key="hot_n_per")
             ynlp = df.dropna(subset=["year", "AB"]).copy()
             ynlp["year"] = ynlp["year"].astype(int)
             ym = ynlp["year"].max()
             periods = {}
-            for i in range(4):
+            for i in range(n_per):
                 y_end = ym - i * SPAN; y_start = y_end - SPAN + 1
-                label = f"{y_end}〜{y_start}" if SPAN > 1 else str(y_end)
+                label = str(y_end) if SPAN == 1 else f"{y_end}〜{y_start}"
                 subset = ynlp[ynlp["year"].isin(range(y_start, y_end + 1))]["AB"].tolist()
                 if subset:
                     periods[label] = " ".join(subset)
@@ -779,138 +892,10 @@ elif page == "🔤 自然言語処理":
             with st.expander("単語（参考）"):
                 tfidf_chart(periods, top_w3, "word", "年度別 特徴語 (word / TF-IDF)")
 
-# ═══════════════════════════════════════════════════════════════
-# ネットワーク分析（共著 + 単語共起）
-# ═══════════════════════════════════════════════════════════════
-elif page == "🕸️ ネットワーク分析":
-    st.markdown("## ネットワーク分析")
-    if df is None:
-        st.warning("先にデータをアップロードしてください。")
-        st.stop()
-
-    tab_co, tab_word = st.tabs(["👥 共著関係", "💬 単語共起 (bigram)"])
-
-    # ════════════════════════════════════════════
-    # 共著関係（3部構成）
-    # ════════════════════════════════════════════
-    with tab_co:
-        if "FAU" not in df.columns:
-            st.error("FAU列が見つかりません。")
-        else:
-            cl, cr = st.columns([1, 3])
-            with cl:
-                top_n_co   = st.slider("対象著者数", 20, 100, 50, key="co_topn")
-                cent_co    = st.selectbox("中心性指標", ["pagerank", "betweenness"], key="co_cent")
-                show_lbl   = st.checkbox("著者名を表示", value=True, key="co_lbl")
-                top_comm_n = st.slider("コミュニティ表示数", 3, 8, 5, key="co_comm_n")
-                top_feat_n = st.slider("特徴語表示数", 5, 15, 8, key="co_feat_n")
-                span_net   = st.slider("期間比較（年数）", 2, 5, 3, key="co_span")
-                run_co     = st.button("🔍 分析実行", key="co_run")
-
-            if run_co:
-                with st.spinner("共著ネットワークを構築中..."):
-                    G_co = build_coauthor_graph(df["FAU"], top_n=top_n_co)
-
-                # ── ① 全期間ネットワーク ──────────────────────────
-                with cr:
-                    fig_co = nx_to_plotly(
-                        G_co, centrality=cent_co,
-                        title=f"共著ネットワーク（Top{top_n_co}・{cent_co}）",
-                        directed=False, show_labels=show_lbl,
-                    )
-                    st.plotly_chart(fig_co, use_container_width=True)
-
-                # ── 中心性スコア上位 ───────────────────────────────
-                cent_scores = (nx.pagerank(G_co, weight="weight") if cent_co == "pagerank"
-                               else nx.betweenness_centrality(G_co, weight="weight"))
-                top_cent_df = pd.DataFrame(
-                    sorted(cent_scores.items(), key=lambda x: x[1], reverse=True)[:15],
-                    columns=["著者", f"{cent_co}スコア"]
-                )
-                st.markdown("#### 中心性スコア上位15名")
-                st.dataframe(top_cent_df, use_container_width=True)
-
-                # ── ② コミュニティ別特徴語 ──────────────────────────
-                st.markdown("---")
-                st.markdown("#### コミュニティ別 特徴語（bigram）")
-                if "AB" in df.columns:
-                    from networkx.algorithms.community import greedy_modularity_communities
-                    comms = list(greedy_modularity_communities(G_co, weight="weight"))
-                    comms = sorted([c for c in comms if len(c) >= 3], key=len, reverse=True)
-                    st.caption(f"検出コミュニティ数（3名以上）: {len(comms)}")
-
-                    comm_texts = {}
-                    comm_info_rows = []
-                    for i, comm in enumerate(comms[:top_comm_n]):
-                        label = f"Comm {i+1}（{len(comm)}名）"
-                        txt   = get_community_texts(comm, df)
-                        if txt.strip():
-                            comm_texts[label] = txt
-                        top3 = [a for a, _ in sorted(
-                            cent_scores.items(), key=lambda x: x[1], reverse=True
-                        ) if a in comm][:3]
-                        comm_info_rows.append({
-                            "コミュニティ": label,
-                            "人数": len(comm),
-                            "主要著者（中心性上位3名）": ", ".join(top3),
-                        })
-                    st.dataframe(pd.DataFrame(comm_info_rows), use_container_width=True)
-
-                    if comm_texts:
-                        tfidf_chart(comm_texts, top_feat_n, "bigram",
-                                    f"コミュニティ別 特徴語（Top{top_feat_n} bigram）")
-                else:
-                    st.info("AB列がないためコミュニティ特徴語は表示できません。")
-
-                # ── ③ 期間比較 ──────────────────────────────────────
-                st.markdown("---")
-                st.markdown("#### 期間比較ネットワーク")
-                y_max_net = int(df["year"].dropna().max())
-                recent_y  = list(range(y_max_net - span_net + 1, y_max_net + 1))
-                prev_y    = list(range(y_max_net - span_net * 2 + 1, y_max_net - span_net + 1))
-                st.caption(f"直近{span_net}年: {recent_y[0]}〜{recent_y[-1]}　／　前{span_net}年: {prev_y[0]}〜{prev_y[-1]}")
-
-                G_rec  = build_coauthor_graph(df[df["year"].isin(recent_y)]["FAU"], top_n=top_n_co)
-                G_prev = build_coauthor_graph(df[df["year"].isin(prev_y)]["FAU"],   top_n=top_n_co)
-
-                cc1, cc2 = st.columns(2)
-                with cc1:
-                    st.plotly_chart(
-                        nx_to_plotly(G_rec, centrality=cent_co,
-                                     title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）",
-                                     show_labels=show_lbl),
-                        use_container_width=True,
-                    )
-                with cc2:
-                    st.plotly_chart(
-                        nx_to_plotly(G_prev, centrality=cent_co,
-                                     title=f"前{span_net}年（{prev_y[0]}〜{prev_y[-1]}）",
-                                     show_labels=show_lbl),
-                        use_container_width=True,
-                    )
-
-                # ── 新規共著ペア ────────────────────────────────────
-                prev_edge_set = set(frozenset(e) for e in G_prev.edges())
-                new_edge_rows = [
-                    {"著者A": u, "著者B": v, "共著件数": int(data.get("weight", 1))}
-                    for u, v, data in G_rec.edges(data=True)
-                    if frozenset((u, v)) not in prev_edge_set
-                ]
-                if new_edge_rows:
-                    new_df = (pd.DataFrame(new_edge_rows)
-                              .sort_values("共著件数", ascending=False)
-                              .reset_index(drop=True))
-                    st.markdown(f"#### 新規共著ペア（直近{span_net}年に初登場）: {len(new_df)} ペア")
-                    st.dataframe(new_df.head(30), use_container_width=True)
-                else:
-                    st.info("新規共著ペアなし。")
-
-    # ════════════════════════════════════════════
-    # 単語共起（bigram・3期間比較）
-    # ════════════════════════════════════════════
-    with tab_word:
-        if "AB" not in df.columns:
-            st.error("AB列が見つかりません。")
+    # ── Tab2: 単語共起ネットワーク（bigram・3期間比較）──────────
+    with tab2:
+        if "year" not in df.columns:
+            st.error("year 列が見つかりません。")
         else:
             cl2, cr2 = st.columns([1, 3])
             with cl2:
@@ -946,12 +931,10 @@ elif page == "🕸️ ネットワーク分析":
                         )
                     with cr2:
                         st.plotly_chart(fig_w, use_container_width=True)
-
-                    # 中心語収集
                     if G_w.nodes:
                         scores = (nx.pagerank(G_w, weight="weight") if cent_w == "pagerank"
                                   else nx.betweenness_centrality(G_w, weight="weight"))
-                        for rank, (word, sc) in enumerate(
+                        for rank, (word, _) in enumerate(
                             sorted(scores.items(), key=lambda x: x[1], reverse=True)[:10], 1
                         ):
                             succs = [(v, G_w[word][v].get("weight", 0))
@@ -960,7 +943,6 @@ elif page == "🕸️ ネットワーク分析":
                                             if succs else word)
                             compare_rows.append({"期間": label, "rank": rank, "bigram": display_term})
 
-                # 比較テーブル
                 if compare_rows:
                     comp_df = (pd.DataFrame(compare_rows)
                                .pivot(index="rank", columns="期間", values="bigram")
@@ -971,10 +953,10 @@ elif page == "🕸️ ネットワーク分析":
                         st.dataframe(comp_df, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════
-# MeSH 分析
+# MeSH分析
 # ═══════════════════════════════════════════════════════════════
 elif page == "🧬 MeSH分析":
-    st.markdown("## 🧬 MeSH ターム分析")
+    st.markdown("## 🧬 MeSH・疾患概念分析")
     if df is None:
         st.warning("先に「📂 Data Upload」でデータをアップロードしてください。")
         st.stop()
@@ -1078,3 +1060,145 @@ elif page == "🧬 MeSH分析":
             st.download_button("⬇️ バースト検知結果 (CSV)",
                                burst_df.to_csv(index=False).encode(),
                                "mesh_burst.csv", "text/csv")
+
+# ═══════════════════════════════════════════════════════════════
+# 著者分析
+# ═══════════════════════════════════════════════════════════════
+elif page == "👤 著者分析":
+    st.markdown("## 👤 著者分析")
+    if df is None:
+        st.warning("先にデータをアップロードしてください。")
+        st.stop()
+    if "FAU" not in df.columns:
+        st.error("FAU（著者）列が見つかりません。")
+        st.stop()
+
+    tab1, tab2 = st.tabs(["🔤 著者別 bigram特徴語", "🕸️ 共著ネットワーク"])
+
+    # ── Tab1: 著者別 bigram特徴語 ────────────────────────────────
+    with tab1:
+        if "AB" not in df.columns:
+            st.error("AB（Abstract）列が見つかりません。")
+        else:
+            top_a_n = st.slider("対象著者数", 3, 10, 6, key="au_a_n")
+            top_w2  = st.slider("表示フレーズ数", 5, 20, 10, key="au_a_w")
+            au_rows = [{"author": shorten_name(r["FAU"][0]), "AB": r["AB"]}
+                       for _, r in df.iterrows()
+                       if isinstance(r.get("FAU"), list) and r["FAU"] and pd.notna(r.get("AB"))]
+            au_df2 = pd.DataFrame(au_rows)
+            if not au_df2.empty:
+                top6a = au_df2["author"].value_counts().head(top_a_n).index.tolist()
+                a_texts = {a: " ".join(au_df2[au_df2["author"] == a]["AB"].tolist())
+                           for a in top6a}
+                tfidf_chart(a_texts, top_w2, "bigram", "著者別 特徴語 (bigram / TF-IDF)")
+                with st.expander("単語（参考）"):
+                    tfidf_chart(a_texts, top_w2, "word", "著者別 特徴語 (word / TF-IDF)")
+
+    # ── Tab2: 共著ネットワーク（3部構成）────────────────────────
+    with tab2:
+        cl, cr = st.columns([1, 3])
+        with cl:
+            top_n_co   = st.slider("対象著者数", 20, 100, 50, key="co_topn")
+            cent_co    = st.selectbox("中心性指標", ["pagerank", "betweenness"], key="co_cent")
+            show_lbl   = st.checkbox("著者名を表示", value=True, key="co_lbl")
+            top_comm_n = st.slider("コミュニティ表示数", 3, 8, 5, key="co_comm_n")
+            top_feat_n = st.slider("特徴語表示数", 5, 15, 8, key="co_feat_n")
+            span_net   = st.slider("期間比較（年数）", 2, 5, 3, key="co_span")
+            run_co     = st.button("🔍 分析実行", key="co_run")
+
+        if run_co:
+            with st.spinner("共著ネットワークを構築中..."):
+                G_co = build_coauthor_graph(df["FAU"], top_n=top_n_co)
+
+            # ① 全期間ネットワーク
+            with cr:
+                fig_co = nx_to_plotly(
+                    G_co, centrality=cent_co,
+                    title=f"共著ネットワーク（Top{top_n_co}・{cent_co}）",
+                    directed=False, show_labels=show_lbl,
+                )
+                st.plotly_chart(fig_co, use_container_width=True)
+
+            cent_scores = (nx.pagerank(G_co, weight="weight") if cent_co == "pagerank"
+                           else nx.betweenness_centrality(G_co, weight="weight"))
+            top_cent_df = pd.DataFrame(
+                sorted(cent_scores.items(), key=lambda x: x[1], reverse=True)[:15],
+                columns=["著者", f"{cent_co}スコア"]
+            )
+            st.markdown("#### 中心性スコア上位15名")
+            st.dataframe(top_cent_df, use_container_width=True)
+
+            # ② コミュニティ別特徴語
+            st.markdown("---")
+            st.markdown("#### コミュニティ別 特徴語（bigram）")
+            if "AB" in df.columns:
+                from networkx.algorithms.community import greedy_modularity_communities
+                comms = list(greedy_modularity_communities(G_co, weight="weight"))
+                comms = sorted([c for c in comms if len(c) >= 3], key=len, reverse=True)
+                st.caption(f"検出コミュニティ数（3名以上）: {len(comms)}")
+
+                comm_texts = {}
+                comm_info_rows = []
+                for i, comm in enumerate(comms[:top_comm_n]):
+                    label = f"Comm {i+1}（{len(comm)}名）"
+                    txt   = get_community_texts(comm, df)
+                    if txt.strip():
+                        comm_texts[label] = txt
+                    top3 = [a for a, _ in sorted(
+                        cent_scores.items(), key=lambda x: x[1], reverse=True
+                    ) if a in comm][:3]
+                    comm_info_rows.append({
+                        "コミュニティ": label,
+                        "人数": len(comm),
+                        "主要著者（中心性上位3名）": ", ".join(top3),
+                    })
+                st.dataframe(pd.DataFrame(comm_info_rows), use_container_width=True)
+                if comm_texts:
+                    tfidf_chart(comm_texts, top_feat_n, "bigram",
+                                f"コミュニティ別 特徴語（Top{top_feat_n} bigram）")
+            else:
+                st.info("AB列がないためコミュニティ特徴語は表示できません。")
+
+            # ③ 期間比較
+            st.markdown("---")
+            st.markdown("#### 期間比較ネットワーク")
+            y_max_net = int(df["year"].dropna().max())
+            recent_y  = list(range(y_max_net - span_net + 1, y_max_net + 1))
+            prev_y    = list(range(y_max_net - span_net * 2 + 1, y_max_net - span_net + 1))
+            st.caption(
+                f"直近{span_net}年: {recent_y[0]}〜{recent_y[-1]}"
+                f"　／　前{span_net}年: {prev_y[0]}〜{prev_y[-1]}"
+            )
+            G_rec  = build_coauthor_graph(df[df["year"].isin(recent_y)]["FAU"], top_n=top_n_co)
+            G_prev = build_coauthor_graph(df[df["year"].isin(prev_y)]["FAU"],   top_n=top_n_co)
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.plotly_chart(
+                    nx_to_plotly(G_rec, centrality=cent_co,
+                                 title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）",
+                                 show_labels=show_lbl),
+                    use_container_width=True,
+                )
+            with cc2:
+                st.plotly_chart(
+                    nx_to_plotly(G_prev, centrality=cent_co,
+                                 title=f"前{span_net}年（{prev_y[0]}〜{prev_y[-1]}）",
+                                 show_labels=show_lbl),
+                    use_container_width=True,
+                )
+
+            # 新規共著ペア
+            prev_edge_set = set(frozenset(e) for e in G_prev.edges())
+            new_edge_rows = [
+                {"著者A": u, "著者B": v, "共著件数": int(data.get("weight", 1))}
+                for u, v, data in G_rec.edges(data=True)
+                if frozenset((u, v)) not in prev_edge_set
+            ]
+            if new_edge_rows:
+                new_df = (pd.DataFrame(new_edge_rows)
+                          .sort_values("共著件数", ascending=False)
+                          .reset_index(drop=True))
+                st.markdown(f"#### 新規共著ペア（直近{span_net}年に初登場）: {len(new_df)} ペア")
+                st.dataframe(new_df.head(30), use_container_width=True)
+            else:
+                st.info("新規共著ペアなし。")
