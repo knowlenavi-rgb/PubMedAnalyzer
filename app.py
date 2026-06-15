@@ -53,7 +53,55 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
+def load_config():
+    """
+    認証設定の読み込み（優先順位）
+      1. Google Colab Secrets  (PUBMED_APP_CONFIG)
+      2. Streamlit Cloud Secrets (st.secrets)
+      3. ローカルの config.yaml
+    """
+    # ── Colab 環境 ──────────────────────────────
+    try:
+        from google.colab import userdata
+        import json as _json
+        raw = userdata.get("PUBMED_APP_CONFIG")
+        if raw:
+            return _json.loads(raw)
+    except Exception:
+        pass
 
+    # ── Streamlit Cloud 環境 ────────────────────
+    if "credentials" in st.secrets:
+        return {
+            "credentials": dict(st.secrets["credentials"]),
+            "cookie": dict(st.secrets["cookie"]),
+        }
+
+    # ── ローカル開発環境 ────────────────────────
+    with open("config.yaml") as f:
+        return yaml.load(f, Loader=SafeLoader)
+
+config = load_config()
+
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+name, auth_status, username = authenticator.login("ログイン", "main")
+
+if auth_status is False:
+    st.error("ユーザー名またはパスワードが正しくありません")
+    st.stop()
+elif auth_status is None:
+    st.info("ユーザー名とパスワードを入力してください")
+    st.stop()
+
+authenticator.logout("ログアウト", "sidebar")
+st.sidebar.markdown(f"👤 **{name}** さん")
+st.sidebar.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════
 # MEDLINE パーサー
