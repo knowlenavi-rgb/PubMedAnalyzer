@@ -58,18 +58,23 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 def get_auth_config():
     cfg = None
+    
     # 1. Streamlit Cloud / ローカルの secrets 読み込み
     if "credentials" in st.secrets:
+        # 重要: dict() でキャストすることで、st.secrets の特殊な挙動を解除し、
+        # ただの辞書としてコピー可能な状態にします。
         cfg = {
             "credentials": dict(st.secrets["credentials"]),
             "cookie": dict(st.secrets["cookie"]),
         }
+    
     # 2. ローカル用 yaml (存在する場合)
     elif os.path.exists("config.yaml"):
         with open("config.yaml") as f:
             cfg = yaml.load(f, Loader=SafeLoader)
-            
-    return copy.deepcopy(cfg) if cfg else None
+    
+    # deepcopy はもう不要です。すでに dict() で安全な新しい辞書を作成しているため。
+    return cfg
 
 config = get_auth_config()
 
