@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,6 +16,7 @@ import streamlit_authenticator as stauth
 from yaml.loader import SafeLoader
 import os
 import json
+import base64
 
 # ─── NLTK ─────────────────────────────────────────────────────
 @st.cache_resource
@@ -29,41 +29,116 @@ download_nltk()
 
 # ─── Page config ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="文献データ解析アプリ",
+    page_title="文献Analyzer",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+# ─── デザイントークン ────────────────────────────────────────────
+# 配色: ネイビー（信頼感）× ティール（先進性のアクセント）
+INK      = "#16202c"   # ヘッダー・サイドバーのベース
+INK_SOFT = "#27384a"
+TEAL     = "#19b3a6"   # アクセント
+TEAL_DK  = "#0e8a80"
+SLATE    = "#5a6b7d"   # 補助テキスト
+BG       = "#f7f9fb"   # ページ背景
+
+st.markdown(f"""
 <style>
-    .block-container { padding-top: 2rem; }
-    h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.3rem; }
-    h3 { color: #34495e; }
-    div[data-testid="stForm"] { max-width: 400px; margin: auto; }
-    /* タブを大きく・目立つように */
-    div[data-baseweb="tab-list"] button[data-baseweb="tab"] {
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+JP:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"] {{
+        font-family: 'Inter', 'Noto Sans JP', -apple-system, sans-serif;
+    }}
+
+    .stApp {{ background: {BG}; }}
+    .block-container {{ padding-top: 1.2rem; max-width: 1320px; }}
+
+    /* ── 見出し ──────────────────────────────────────────── */
+    h1 {{
+        color: {INK}; font-weight: 800; letter-spacing: -0.02em;
+    }}
+    h2 {{
+        color: {INK}; font-weight: 700; letter-spacing: -0.01em;
+        border-bottom: 2px solid {TEAL}; padding-bottom: 0.4rem;
+        margin-top: 0.2rem;
+    }}
+    h3, h4 {{ color: {INK_SOFT}; font-weight: 600; }}
+
+    /* ── サイドバー ──────────────────────────────────────── */
+    section[data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, {INK} 0%, {INK_SOFT} 100%);
+    }}
+    section[data-testid="stSidebar"] * {{ color: #e7ecf1 !important; }}
+    section[data-testid="stSidebar"] .stRadio label {{
+        font-size: 0.95rem;
+    }}
+    section[data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.15); }}
+    section[data-testid="stSidebar"] .stSlider [data-baseweb="slider"] > div > div {{
+        background: {TEAL} !important;
+    }}
+    .sidebar-logo-box {{
+        display:flex; align-items:center; gap:10px;
+        padding: 6px 4px 18px 4px; margin-bottom: 6px;
+        border-bottom: 1px solid rgba(255,255,255,0.15);
+    }}
+    .sidebar-logo-box img {{
+        max-height: 42px; max-width: 100%; border-radius: 6px;
+        background: rgba(255,255,255,0.92); padding: 4px 8px;
+    }}
+    .sidebar-brand {{
+        font-weight: 800; font-size: 1.05rem; color: #fff !important;
+        letter-spacing: -0.01em;
+    }}
+
+    /* ── タブ ─────────────────────────────────────────────── */
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"] {{
         font-size: 1rem !important;
         font-weight: 600 !important;
         padding: 10px 18px !important;
-    }
-    div[data-baseweb="tab-list"] {
+        color: {SLATE};
+    }}
+    div[data-baseweb="tab-list"] {{
         gap: 4px;
-        border-bottom: 2px solid #e0e6ed;
-    }
-    div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] {
-        border-bottom: 3px solid #3498db !important;
-        color: #3498db !important;
-    }
-    .kpi-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
-    .kpi-card { background:#f8fafc; border-radius:8px; padding:12px 20px;
-                min-width:140px; text-align:center; border-top:4px solid #3498db; flex:1; }
-    .kpi-card.green  { border-top-color:#2ecc71; }
-    .kpi-card.orange { border-top-color:#f39c12; }
-    .kpi-card.purple { border-top-color:#9b59b6; }
-    .kpi-label { font-size:0.78rem; color:#7f8c8d; margin-bottom:4px; }
-    .kpi-value { font-size:1.8rem; font-weight:700; color:#2c3e50; line-height:1; }
-    .kpi-unit  { font-size:0.72rem; color:#aaa; margin-top:2px; }
+        border-bottom: 2px solid #e3e8ee;
+    }}
+    div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] {{
+        border-bottom: 3px solid {TEAL} !important;
+        color: {TEAL_DK} !important;
+    }}
+
+    /* ── ボタン ───────────────────────────────────────────── */
+    .stButton > button, .stDownloadButton > button {{
+        border-radius: 8px; font-weight: 600;
+        border: 1px solid #d8dfe6;
+        transition: all 0.15s ease;
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover {{
+        border-color: {TEAL}; color: {TEAL_DK};
+    }}
+
+    div[data-testid="stForm"] {{ max-width: 400px; margin: auto; }}
+
+    /* ── KPI カード ───────────────────────────────────────── */
+    .kpi-row {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }}
+    .kpi-card {{
+        background:#ffffff; border-radius:12px; padding:14px 20px;
+        min-width:140px; text-align:center; flex:1;
+        border-top:4px solid {TEAL};
+        box-shadow: 0 1px 3px rgba(22,32,44,0.06), 0 1px 2px rgba(22,32,44,0.04);
+    }}
+    .kpi-card.green  {{ border-top-color:#2ecc71; }}
+    .kpi-card.orange {{ border-top-color:#f39c12; }}
+    .kpi-card.purple {{ border-top-color:#9b59b6; }}
+    .kpi-label {{ font-size:0.78rem; color:{SLATE}; margin-bottom:4px; font-weight: 500; }}
+    .kpi-value {{ font-size:1.9rem; font-weight:800; color:{INK}; line-height:1; }}
+    .kpi-unit  {{ font-size:0.72rem; color:#aaa; margin-top:2px; }}
+
+    /* ── データフレーム・エクスパンダー ──────────────────── */
+    div[data-testid="stExpander"] {{
+        border: 1px solid #e3e8ee; border-radius: 10px;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -262,6 +337,72 @@ def nx_to_plotly(G, centrality: str = "pagerank", title: str = "",
     )
     return fig
 
+def nx_to_plotly_diff(G, centrality: str = "pagerank", title: str = "",
+                       show_labels: bool = True,
+                       highlight_nodes: set = None, highlight_edges: set = None):
+    """期間比較ネットワーク用。新規ノード・新規エッジをオレンジで強調表示する。"""
+    highlight_nodes = highlight_nodes or set()
+    highlight_edges = highlight_edges or set()
+    if not G.nodes:
+        return go.Figure()
+    np.random.seed(42)
+    pos = nx.spring_layout(G, seed=42, k=1.2 / math.sqrt(max(len(G.nodes), 1)))
+    cent = (nx.pagerank(G, weight="weight") if centrality == "pagerank"
+            else nx.betweenness_centrality(G, weight="weight"))
+    max_cent = max(cent.values()) if cent else 1
+
+    NEW_COLOR = "#f39c12"      # 新規（オレンジ）
+    BASE_COLOR = "#95a5a6"     # 既存（グレー）
+    NEW_EDGE_COLOR = "#f39c12"
+    BASE_EDGE_COLOR = "#ccc"
+
+    # エッジを「新規」「既存」に分けてそれぞれ描画（凡例に出すため）
+    base_edge_x, base_edge_y = [], []
+    new_edge_x, new_edge_y = [], []
+    for u, v in G.edges():
+        x0, y0 = pos[u]; x1, y1 = pos[v]
+        if frozenset((u, v)) in highlight_edges:
+            new_edge_x += [x0, x1, None]; new_edge_y += [y0, y1, None]
+        else:
+            base_edge_x += [x0, x1, None]; base_edge_y += [y0, y1, None]
+
+    node_colors = [NEW_COLOR if n in highlight_nodes else BASE_COLOR for n in G.nodes]
+    node_line_w = [2 if n in highlight_nodes else 1 for n in G.nodes]
+
+    traces = [
+        go.Scatter(x=base_edge_x, y=base_edge_y, mode="lines",
+                   line=dict(width=0.7, color=BASE_EDGE_COLOR), hoverinfo="none",
+                   name="既存の共著関係", showlegend=bool(base_edge_x)),
+        go.Scatter(x=new_edge_x, y=new_edge_y, mode="lines",
+                   line=dict(width=1.8, color=NEW_EDGE_COLOR), hoverinfo="none",
+                   name="新規の共著関係", showlegend=bool(new_edge_x)),
+        go.Scatter(
+            x=[pos[n][0] for n in G.nodes],
+            y=[pos[n][1] for n in G.nodes],
+            mode="markers+text" if show_labels else "markers",
+            text=list(G.nodes) if show_labels else [],
+            textposition="top center", textfont=dict(size=9),
+            marker=dict(
+                size=[max(8, cent.get(n, 0) / max_cent * 40) for n in G.nodes],
+                color=node_colors,
+                line=dict(width=node_line_w, color="white"),
+            ),
+            hovertext=[f"{n}<br>centrality: {cent.get(n,0):.4f}"
+                       + ("<br>★ 新規著者" if n in highlight_nodes else "") for n in G.nodes],
+            hoverinfo="text", name="著者", showlegend=False,
+        ),
+    ]
+    fig = go.Figure(traces)
+    fig.update_layout(
+        title=title, title_x=0.5,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(l=20, r=20, t=40, b=20), height=600,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", font=dict(size=10)),
+    )
+    return fig
+
 def get_community_texts(community_nodes, df_src):
     texts = []
     for _, row in df_src.iterrows():
@@ -355,6 +496,37 @@ def detect_bursts(mdf: pd.DataFrame, top_n: int, min_year: int, z_th: float):
 # ═══════════════════════════════════════════════════════════════
 if "df" not in st.session_state:
     st.session_state.df = None
+if "logo_b64" not in st.session_state:
+    st.session_state.logo_b64 = None
+
+# ═══════════════════════════════════════════════════════════════
+# サイドバー：ロゴ
+# ═══════════════════════════════════════════════════════════════
+with st.sidebar:
+    if st.session_state.logo_b64:
+        st.markdown(
+            f"""<div class="sidebar-logo-box">
+                    <img src="data:image/png;base64,{st.session_state.logo_b64}" />
+                    <span class="sidebar-brand">文献Analyzer</span>
+                </div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="sidebar-logo-box"><span class="sidebar-brand">📚 文献Analyzer</span></div>',
+            unsafe_allow_html=True,
+        )
+    with st.expander("🏷️ 自社ロゴを設定", expanded=False):
+        logo_file = st.file_uploader(
+            "ロゴ画像（PNG / JPG）", type=["png", "jpg", "jpeg"], key="logo_uploader",
+            help="アップロードしたロゴはこのセッション中、サイドバー上部に表示されます。",
+        )
+        if logo_file is not None:
+            st.session_state.logo_b64 = base64.b64encode(logo_file.read()).decode()
+            st.rerun()
+        if st.session_state.logo_b64 and st.button("ロゴを削除", key="logo_clear"):
+            st.session_state.logo_b64 = None
+            st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
 # ナビゲーション
@@ -370,7 +542,7 @@ PAGES = [
 ]
 page = st.sidebar.radio("ページ選択", PAGES)
 st.sidebar.markdown("---")
-st.sidebar.caption("PubMed文献解析アプリ v2.2")
+st.sidebar.caption("文献Analyzer v2.2")
 
 df = st.session_state.df
 
@@ -378,15 +550,21 @@ df = st.session_state.df
 # HOME
 # ═══════════════════════════════════════════════════════════════
 if page == "🏠 Home":
-    st.markdown("# 📚 PubMed 文献データ分析・可視化アプリケーション")
+    st.markdown("# 📚 文献Analyzer")
+    st.markdown(
+        "<p style='font-size:1.05rem; color:#5a6b7d; margin-top:-0.5rem;'>"
+        "PubMedのダウンロードデータを使って、該当領域のトレンドや著者の分析ができるアプリケーションです。"
+        "</p>",
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("""
 **使い方**
 1. [PubMed](https://pubmed.ncbi.nlm.nih.gov/) で任意のキーワードで文献を検索
-2. **MEDLINE形式** でデータをダウンロード  
-   （Send to → Citation manager → Format: MEDLINE）
+2. **PubMed形式** でデータをダウンロード  
+   （Send to → Citation manager → Format: PubMed）
 3. 「📂 Data Upload」からファイルをアップロード
 4. 左のナビから目的のページを選んで分析
         """)
@@ -398,10 +576,10 @@ if page == "🏠 Home":
 |--------|---------|
 | 📂 Data Upload | ファイル読込・基礎統計・CSV出力 |
 | 📊 Overview | 文献数推移・Journalランキング・著者ランキング・バブルチャート |
-| 📰 Journal分析 | Journal推移（積み上げ）・bigram特徴語・MeSH特徴語 |
-| 🔥 ホットキーワード | 年度別特徴語・単語共起ネットワーク（3期間） |
+| 📰 Top Journal分析 | Journal推移（積み上げ）・bigram特徴語・MeSH特徴語 |
+| 🔥 Hot Keywords | 年度別特徴語・単語共起ネットワーク（3期間） |
 | 🧬 MeSH分析 | MeSHヒートマップ・バースト検知タイムライン |
-| 👤 著者分析 | 著者別bigram・共著ネットワーク・コミュニティ・期間比較 |
+| 👤 著者分析 | 著者別特徴語・共著ネットワーク・コミュニティ・期間比較 |
         """)
     st.info("⬅️ 左のサイドバーから「📂 Data Upload」を選んでください。")
 
@@ -412,9 +590,9 @@ elif page == "📂 Data Upload":
     st.markdown("## 解析データのアップロード・基礎解析")
 
     uploaded = st.file_uploader(
-        "MEDLINE形式テキストファイルをアップロード（.txt）",
+        "PubMed形式テキストファイルをアップロード（.txt）",
         type=["txt"],
-        help="PubMedからMEDLINE形式でダウンロードしたファイル。目安1,500文献程度まで。",
+        help="PubMedからPubMed形式でダウンロードしたファイル。目安1,500文献程度まで。",
     )
     if uploaded:
         raw = uploaded.read().decode("utf-8", errors="ignore")
@@ -476,8 +654,8 @@ elif page == "📂 Data Upload":
                 mh_cnt = int(df["MH"].apply(lambda x: len(x) > 0).sum()) if "MH" in df.columns else 0
                 st.markdown(f"- **MeSHデータあり**: {mh_cnt:,} 件")
 
-        # ── 生データプレビュー ───────────────────────────────────
-        st.markdown("### 生データプレビュー（先頭10件）")
+        # ── データプレビュー ───────────────────────────────────
+        st.markdown("### データプレビュー（先頭10件）")
         preview_cols = [c for c in ["PMID", "TI", "TA", "DP", "year", "AB"] if c in df.columns]
         st.dataframe(df[preview_cols].head(10), use_container_width=True)
 
@@ -536,7 +714,7 @@ elif page == "📊 Overview":
         st.stop()
 
     tab1, tab2, tab3, tab4 = st.tabs(
-        ["📈 文献数推移", "📰 Journalランキング", "👥 Top Authors", "🫧 著者推移"]
+        ["📈 文献数推移", "📰 Top Journals", "👥 Top Authors", "🫧 著者推移"]
     )
 
     # ── Tab1: 文献数推移 ─────────────────────────────────────────
@@ -546,18 +724,32 @@ elif page == "📊 Overview":
             yd["year"] = yd["year"].astype(int)
             y_min, y_max = int(yd["year"].min()), int(yd["year"].max())
             yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max), key="ov_yr_slider")
+            yd_f = yd[(yd["year"] >= yr[0]) & (yd["year"] <= yr[1])]
+            year_counts = yd_f.groupby("year").size().reset_index(name="文献数")
+            fig_yr = px.bar(
+                year_counts, x="year", y="文献数",
+                color_discrete_sequence=["#3498db"],
+                title=f"文献数 年別推移（{yr[0]}〜{yr[1]}）",
+                labels={"year": "Year"},
+                height=480,
+            )
+            fig_yr.update_layout(xaxis=dict(dtick=1, tickangle=-45))
+            st.plotly_chart(fig_yr, use_container_width=True)
+
+    # ── Tab2: Top Journals ──────────────────────────────────────
+    with tab2:
+        if "TA" in df.columns:
+            TOP_J = st.slider("表示Journal数", 5, 30, 15, key="ov_top_j")
             jdf = df.dropna(subset=["TA"]).copy()
             top_j = jdf["TA"].value_counts().head(TOP_J).reset_index()
             top_j.columns = ["Journal", "総文献数"]
-            top_j_sorted = top_j.sort_values("総文献数", ascending=True)
             fig_ja = px.bar(
-                top_j_sorted, x="総文献数", y="Journal", orientation="h",
+                top_j, x="総文献数", y="Journal", orientation="h",
                 color_discrete_sequence=["#2ecc71"],
                 title=f"Top {TOP_J} Journal（全期間・総文献数順）",
             )
             fig_ja.update_layout(
-                yaxis=dict(categoryorder="array",
-                           categoryarray=top_j_sorted["Journal"].tolist()),
+                yaxis=dict(categoryorder="total ascending"),
                 height=max(400, TOP_J * 26),
             )
             st.plotly_chart(fig_ja, use_container_width=True)
@@ -588,7 +780,7 @@ elif page == "📊 Overview":
                     fig = px.bar(data, x=xcol, y="Author", orientation="h",
                                  color_discrete_sequence=[clr], title=ttl, height=500)
                     fig.update_layout(yaxis=dict(categoryorder="total ascending"))
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"ov_author_{ttl}")
             st.markdown("#### 著者ランキング統合テーブル")
             merged = (co.merge(fst, on="Author", how="outer")
                         .merge(lst, on="Author", how="outer")
@@ -623,137 +815,23 @@ elif page == "📊 Overview":
                               yaxis_title="累積文献数（件）", xaxis_title="Year")
             st.plotly_chart(fig, use_container_width=True)
 
-    # ── Tab1: 文献数推移 ─────────────────────────────────────────
-    with tab1:
-        if "year" in df.columns:
-            yd = df.dropna(subset=["year"]).copy()
-            yd["year"] = yd["year"].astype(int)
-            y_min, y_max = int(yd["year"].min()), int(yd["year"].max())
-            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max), key="du_yr_slider")
-            jdf = df.dropna(subset=["TA"]).copy()
-            top_j = jdf["TA"].value_counts().head(TOP_J).reset_index()
-            top_j.columns = ["Journal", "総文献数"]
-
-
-            fig_ja = px.bar(
-                top_j, x="総文献数", y="Journal", orientation="h",
-                color_discrete_sequence=["#2ecc71"],
-                title=f"Top {TOP_J} Journal（全期間・総文献数順）",
-            )
-            fig_ja.update_layout(
-                yaxis=dict(categoryorder="total ascending"),
-                height=max(400, TOP_J * 26),
-            )
-            st.plotly_chart(fig_ja, use_container_width=True)
-            st.dataframe(top_j.reset_index(drop=True), use_container_width=True)
-            st.download_button("⬇️ top_journals.csv",
-                               top_j.to_csv(index=False).encode(),
-                               "top_journals.csv", "text/csv")
-
-    # ── Tab3: Journal推移（Top10+Others 積み上げ）────────────────
-    with tab3:
-        if "TA" in df.columns and "year" in df.columns:
-            TOP_STACK = st.slider("個別表示Journal数", 5, 20, 10, key="stack_n")
-            jdf2 = df.dropna(subset=["TA", "year"]).copy()
-            jdf2["year"] = jdf2["year"].astype(int)
-            top_list = jdf2["TA"].value_counts().head(TOP_STACK).index.tolist()
-            jdf2["TA_grp"] = jdf2["TA"].where(jdf2["TA"].isin(top_list), other="Others")
-            trend = (jdf2.groupby(["year", "TA_grp"]).size().reset_index(name="count"))
-            trend["year_str"] = trend["year"].astype(str)
-            # year_str の並び順を明示（文字列軸はアルファベット順になるため積み上げが崩れる対策）
-            year_order = [str(y) for y in sorted(trend["year"].unique())]
-            order = top_list + ["Others"]
-            trend["TA_grp"] = pd.Categorical(trend["TA_grp"], categories=order, ordered=True)
-            trend = trend.sort_values(["year", "TA_grp"])
-            palette = px.colors.qualitative.Plotly
-            color_map = {j: palette[i % len(palette)] for i, j in enumerate(top_list)}
-            color_map["Others"] = "#cccccc"
-            fig_stack = px.bar(
-                trend, x="year_str", y="count", color="TA_grp",
-                barmode="stack",
-                color_discrete_map=color_map,
-                category_orders={"year_str": year_order, "TA_grp": order},
-                labels={"count": "文献数", "year_str": "Year", "TA_grp": "Journal"},
-                title=f"Top {TOP_STACK} Journal + Others 年別推移",
-                height=500,
-            )
-            fig_stack.update_layout(
-                bargap=0.15,
-                xaxis=dict(tickangle=-45),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
-            )
-            st.plotly_chart(fig_stack, use_container_width=True)
-
-    # ── Tab4: Top Authors ────────────────────────────────────────
-    with tab4:
-        if "FAU" in df.columns:
-            TOP_AU = st.slider("表示著者数", 10, 30, 20, key="top_au")
-            all_au, first_au, last_au = [], [], []
-            for authors in df["FAU"]:
-                if isinstance(authors, list) and authors:
-                    s = [shorten_name(a) for a in authors]
-                    all_au.extend(s); first_au.append(s[0]); last_au.append(s[-1])
-            co  = pd.DataFrame(Counter(all_au).most_common(TOP_AU),  columns=["Author", "Co-author数"])
-            fst = pd.DataFrame(Counter(first_au).most_common(TOP_AU), columns=["Author", "1st Author数"])
-            lst = pd.DataFrame(Counter(last_au).most_common(TOP_AU),  columns=["Author", "Last Author数"])
-
-            # グラフ（上）
-            c1, c2, c3 = st.columns(3)
-            for col_st, data, xcol, clr, ttl in [
-                (c1, co,  "Co-author数",  "#e74c3c", f"Co-author Top{TOP_AU}"),
-                (c2, fst, "1st Author数", "#3498db", f"1st Author Top{TOP_AU}"),
-                (c3, lst, "Last Author数","#9b59b6", f"Last Author Top{TOP_AU}"),
-            ]:
-                with col_st:
-                    fig = px.bar(data, x=xcol, y="Author", orientation="h",
-                                 color_discrete_sequence=[clr], title=ttl, height=500)
-                    fig.update_layout(yaxis=dict(categoryorder="total ascending"))
-                    st.plotly_chart(fig, use_container_width=True)
-
-            # 統合テーブル（下）
-            st.markdown("#### 著者ランキング統合テーブル")
-            merged = (co.merge(fst, on="Author", how="outer")
-                        .merge(lst, on="Author", how="outer")
-                        .fillna(0)
-                        .sort_values("Co-author数", ascending=False)
-                        .head(TOP_AU).reset_index(drop=True))
-            st.dataframe(merged, use_container_width=True)
-
-    # ── Tab5: 著者バブル ────────────────────────────────────────
-    with tab5:
-        if "FAU" in df.columns and "year" in df.columns:
-            TOP_BB = st.slider("表示著者数", 10, 30, 20, key="bb_n")
-            rows = [{"year": r["year"], "author": shorten_name(a)}
-                    for _, r in df.iterrows() for a in (r.get("FAU") or [])]
-            auyr = pd.DataFrame(rows).dropna()
-            auyr["year"] = auyr["year"].astype(int)
-            top_authors = auyr["author"].value_counts().head(TOP_BB).index.tolist()
-            bbl = (auyr[auyr["author"].isin(top_authors)]
-                   .groupby(["year", "author"]).size().reset_index(name="当年文献数"))
-            bbl = bbl.sort_values(["author", "year"])
-            bbl["累積文献数"] = bbl.groupby("author")["当年文献数"].cumsum()
-            bbl["hover"] = (bbl["author"] + "<br>当年: " + bbl["当年文献数"].astype(str)
-                            + " 件<br>累積: " + bbl["累積文献数"].astype(str) + " 件")
-            fig = px.scatter(
-                bbl, x="year", y="累積文献数", size="当年文献数", color="author",
-                hover_name="author", custom_data=["hover"], size_max=35, height=620,
-                labels={"year": "Year", "累積文献数": "累積文献数", "当年文献数": "当年文献数"},
-                title=f"著者別年次推移（Top {TOP_BB}）",
-            )
-            fig.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
-            fig.update_layout(legend=dict(font=dict(size=9)),
-                              yaxis_title="累積文献数（件）", xaxis_title="Year")
-            st.plotly_chart(fig, use_container_width=True)
-
 
 # ═══════════════════════════════════════════════════════════════
 # Journal分析
 # ═══════════════════════════════════════════════════════════════
 elif page == "📰 Journal分析":
-    st.markdown("## 📰 Journal分析")
+    st.markdown("## 📰 Top Journal分析")
     if df is None:
         st.warning("先に「📂 Data Upload」でデータをアップロードしてください。")
         st.stop()
+
+    with st.sidebar:
+        st.markdown("**Top Journal分析 設定**")
+        TOP_STACK = st.slider("個別表示Journal数（残りはOthers）", 5, 20, 10, key="jnl_stack_n")
+        top_j_n = st.slider("対象Journal数（bigram特徴語）", 3, 10, 6, key="jnl_j_n")
+        top_w   = st.slider("表示フレーズ数（bigram特徴語）", 5, 20, 10, key="jnl_j_w")
+        top_j_m = st.slider("対象Journal数（MeSH特徴語）", 3, 10, 6, key="jnl_mesh_n")
+        top_m_w = st.slider("表示MeSH数（MeSH特徴語）", 5, 20, 10, key="jnl_mesh_w")
 
     tab1, tab2, tab3 = st.tabs(["📊 Journal推移", "🔤 bigram特徴語", "🧬 MeSH特徴語"])
 
@@ -762,7 +840,6 @@ elif page == "📰 Journal分析":
         if "TA" not in df.columns or "year" not in df.columns:
             st.error("TA または year 列が見つかりません。")
         else:
-            TOP_STACK = st.slider("個別表示Journal数（残りはOthers）", 5, 20, 10, key="jnl_stack_n")
             jdf2 = df.dropna(subset=["TA", "year"]).copy()
             jdf2["year"] = jdf2["year"].astype(int)
             top_list = jdf2["TA"].value_counts().head(TOP_STACK).index.tolist()
@@ -790,15 +867,13 @@ elif page == "📰 Journal分析":
                 xaxis=dict(tickangle=-45),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
             )
-            st.plotly_chart(fig_stack, use_container_width=True)
+            st.plotly_chart(fig_stack, use_container_width=True, key="jnl_trend_chart")
 
     # ── Tab2: Journal別 bigram特徴語 ────────────────────────────
     with tab2:
         if "TA" not in df.columns or "AB" not in df.columns:
             st.error("TA または AB 列が見つかりません。")
         else:
-            top_j_n = st.slider("対象Journal数", 3, 10, 6, key="jnl_j_n")
-            top_w   = st.slider("表示フレーズ数", 5, 20, 10, key="jnl_j_w")
             jnlp = df.dropna(subset=["TA", "AB"]).copy()
             top_jlist = jnlp["TA"].value_counts().head(top_j_n).index.tolist()
             j_texts = {j: " ".join(jnlp[jnlp["TA"] == j]["AB"].tolist()) for j in top_jlist}
@@ -811,8 +886,6 @@ elif page == "📰 Journal分析":
         if "TA" not in df.columns or "MH" not in df.columns:
             st.error("TA または MH 列が見つかりません。")
         else:
-            top_j_m = st.slider("対象Journal数", 3, 10, 6, key="jnl_mesh_n")
-            top_m_w = st.slider("表示MeSH数", 5, 20, 10, key="jnl_mesh_w")
             jmesh = df.dropna(subset=["TA"]).copy()
             jmesh = jmesh[jmesh["MH"].apply(lambda x: isinstance(x, list) and len(x) > 0)]
             top_jm = jmesh["TA"].value_counts().head(top_j_m).index.tolist()
@@ -831,34 +904,26 @@ elif page == "📰 Journal分析":
                 jm_texts = {j: " ".join(mesh_df[mesh_df["Journal"] == j]["mesh"].tolist())
                             for j in top_jm}
                 # wordモードで渡す（MeSH自体がすでに句なのでbigramは不要）
-                result_m = tfidf_top(jm_texts, top_m_w, mode="word")
-                if result_m.empty:
-                    st.info("データが不足しています。")
-                else:
-                    result_m = result_m.sort_values("tfidf", ascending=True)
-                    fig_m = px.bar(
-                        result_m, x="tfidf", y="term", color="group",
-                        facet_col="group", facet_col_wrap=2, orientation="h",
-                        labels={"tfidf": "TF-IDF", "term": ""},
-                        title=f"Journal別 MeSH特徴語 Top{top_m_w}",
-                        height=max(400, len(result_m) * 22),
-                    )
-                    fig_m.update_yaxes(matches=None, showticklabels=True,
-                                       categoryorder="total ascending")
-                    fig_m.update_layout(showlegend=False)
-                    st.plotly_chart(fig_m, use_container_width=True)
+                # bigram特徴語と同じ tfidf_chart を使用し、グラフサイズ・タイトルを統一
+                tfidf_chart(jm_texts, top_m_w, "word", f"Journal別 MeSH特徴語 Top{top_m_w}")
 
 # ═══════════════════════════════════════════════════════════════
 # ホットキーワード
 # ═══════════════════════════════════════════════════════════════
 elif page == "🔥 ホットキーワード":
-    st.markdown("## 🔥 ホットキーワード")
+    st.markdown("## 🔥 Hot Keywords")
     if df is None:
         st.warning("先にデータをアップロードしてください。")
         st.stop()
     if "AB" not in df.columns:
         st.error("AB（Abstract）列が見つかりません。")
         st.stop()
+
+    with st.sidebar:
+        st.markdown("**Hot Keywords 設定**")
+        SPAN   = st.slider("集約年数（1期間）", 1, 5, 3, key="hot_span")
+        top_w3 = st.slider("表示フレーズ数", 5, 20, 10, key="hot_y_w")
+        n_per  = st.slider("表示期間数", 2, 6, 4, key="hot_n_per")
 
     tab1, tab2 = st.tabs(["📅 年度別特徴語", "💬 単語共起ネットワーク"])
 
@@ -867,9 +932,6 @@ elif page == "🔥 ホットキーワード":
         if "year" not in df.columns:
             st.error("year 列が見つかりません。")
         else:
-            SPAN   = st.slider("集約年数（1期間）", 1, 5, 3, key="hot_span")
-            top_w3 = st.slider("表示フレーズ数", 5, 20, 10, key="hot_y_w")
-            n_per  = st.slider("表示期間数", 2, 6, 4, key="hot_n_per")
             ynlp = df.dropna(subset=["year", "AB"]).copy()
             ynlp["year"] = ynlp["year"].astype(int)
             ym = ynlp["year"].max()
@@ -880,7 +942,6 @@ elif page == "🔥 ホットキーワード":
                 subset = ynlp[ynlp["year"].isin(range(y_start, y_end + 1))]["AB"].tolist()
                 if subset:
                     periods[label] = " ".join(subset)
-            st.markdown("#### Bigram（主）")
             tfidf_chart(periods, top_w3, "bigram", "年度別 特徴語 (bigram / TF-IDF)")
             with st.expander("単語（参考）"):
                 tfidf_chart(periods, top_w3, "word", "年度別 特徴語 (word / TF-IDF)")
@@ -923,7 +984,7 @@ elif page == "🔥 ホットキーワード":
                                 title=f"単語共起ネットワーク [bigram]　{label}",
                                 directed=True, show_labels=True,
                             )
-                        st.plotly_chart(fig_w, use_container_width=True)
+                        st.plotly_chart(fig_w, use_container_width=True, key=f"hot_network_{label}")
 
                     if G_w.nodes:
                         scores = (nx.pagerank(G_w, weight="weight") if cent_w == "pagerank"
@@ -1067,15 +1128,25 @@ elif page == "👤 著者分析":
         st.error("FAU（著者）列が見つかりません。")
         st.stop()
 
-    tab1, tab2 = st.tabs(["🔤 著者別 bigram特徴語", "🕸️ 共著ネットワーク"])
+    with st.sidebar:
+        st.markdown("**著者分析 設定**")
+        top_a_n    = st.slider("対象著者数（著者別特徴語）", 3, 10, 6, key="au_a_n")
+        top_w2     = st.slider("表示フレーズ数（著者別特徴語）", 5, 20, 10, key="au_a_w")
+        st.markdown("---")
+        top_n_co   = st.slider("対象著者数（共著ネットワーク）", 20, 100, 50, key="co_topn")
+        show_lbl   = st.checkbox("著者名を表示", value=True, key="co_lbl")
+        top_comm_n = st.slider("コミュニティ表示数", 3, 8, 5, key="co_comm_n")
+        top_feat_n = st.slider("特徴語表示数", 5, 15, 8, key="co_feat_n")
+        span_net   = st.slider("期間比較（年数）", 2, 5, 3, key="co_span")
+        run_co     = st.button("🔄 再実行（設定変更後）", key="co_run")
 
-    # ── Tab1: 著者別 bigram特徴語 ────────────────────────────────
+    tab1, tab2 = st.tabs(["🔤 著者別特徴語", "🕸️ 共著ネットワーク"])
+
+    # ── Tab1: 著者別特徴語 ────────────────────────────────────
     with tab1:
         if "AB" not in df.columns:
             st.error("AB（Abstract）列が見つかりません。")
         else:
-            top_a_n = st.slider("対象著者数", 3, 10, 6, key="au_a_n")
-            top_w2  = st.slider("表示フレーズ数", 5, 20, 10, key="au_a_w")
             au_rows = [{"author": shorten_name(r["FAU"][0]), "AB": r["AB"]}
                        for _, r in df.iterrows()
                        if isinstance(r.get("FAU"), list) and r["FAU"] and pd.notna(r.get("AB"))]
@@ -1090,16 +1161,6 @@ elif page == "👤 著者分析":
 
     # ── Tab2: 共著ネットワーク（3部構成）────────────────────────
     with tab2:
-        cl, cr = st.columns([1, 3])
-        with cl:
-            top_n_co   = st.slider("対象著者数", 20, 100, 50, key="co_topn")
-            cent_co    = st.selectbox("中心性指標", ["pagerank", "betweenness"], key="co_cent")
-            show_lbl   = st.checkbox("著者名を表示", value=True, key="co_lbl")
-            top_comm_n = st.slider("コミュニティ表示数", 3, 8, 5, key="co_comm_n")
-            top_feat_n = st.slider("特徴語表示数", 5, 15, 8, key="co_feat_n")
-            span_net   = st.slider("期間比較（年数）", 2, 5, 3, key="co_span")
-            run_co     = st.button("🔄 再実行（設定変更後）", key="co_run")
-
         # ★ デフォルト自動表示：初回ロード時もネットワークを描画する
         if "co_network_done" not in st.session_state:
             st.session_state.co_network_done = False
@@ -1111,26 +1172,39 @@ elif page == "👤 著者分析":
                 G_co = build_coauthor_graph(df["FAU"], top_n=top_n_co)
 
             # ① 全期間ネットワーク
-            with cr:
-                fig_co = nx_to_plotly(
-                    G_co, centrality=cent_co,
-                    title=f"共著ネットワーク（Top{top_n_co}・{cent_co}）",
-                    directed=False, show_labels=show_lbl,
-                )
-                st.plotly_chart(fig_co, use_container_width=True)
-
-            cent_scores = (nx.pagerank(G_co, weight="weight") if cent_co == "pagerank"
-                           else nx.betweenness_centrality(G_co, weight="weight"))
-            top_cent_df = pd.DataFrame(
-                sorted(cent_scores.items(), key=lambda x: x[1], reverse=True)[:15],
-                columns=["著者", f"{cent_co}スコア"]
+            fig_co = nx_to_plotly(
+                G_co, centrality="pagerank",
+                title=f"共著ネットワーク（Top{top_n_co}）",
+                directed=False, show_labels=show_lbl,
             )
-            st.markdown("#### 中心性スコア上位15名")
-            st.dataframe(top_cent_df, use_container_width=True)
+            st.plotly_chart(fig_co, use_container_width=True, key="co_network_main")
+
+            # 中心性スコア：pagerank・betweenness 両方をTop10で並列表示
+            pr_scores = nx.pagerank(G_co, weight="weight")
+            bw_scores = nx.betweenness_centrality(G_co, weight="weight")
+            top_pr = pd.DataFrame(
+                sorted(pr_scores.items(), key=lambda x: x[1], reverse=True)[:10],
+                columns=["著者", "pagerankスコア"]
+            )
+            top_bw = pd.DataFrame(
+                sorted(bw_scores.items(), key=lambda x: x[1], reverse=True)[:10],
+                columns=["著者", "betweennessスコア"]
+            )
+            st.markdown("#### 中心性スコア Top10（複数軸）")
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                st.caption("pagerank（影響力の大きさ）")
+                st.dataframe(top_pr, use_container_width=True, hide_index=True)
+            with sc2:
+                st.caption("betweenness（橋渡し役の大きさ）")
+                st.dataframe(top_bw, use_container_width=True, hide_index=True)
+
+            # コミュニティ抽出は pagerank スコアを使って主要著者を決める
+            cent_scores = pr_scores
 
             # ② コミュニティ別特徴語
             st.markdown("---")
-            st.markdown("#### コミュニティ別 特徴語（bigram）")
+            st.markdown("#### コミュニティ別 特徴語")
             if "AB" in df.columns:
                 from networkx.algorithms.community import greedy_modularity_communities
                 comms = list(greedy_modularity_communities(G_co, weight="weight"))
@@ -1144,51 +1218,60 @@ elif page == "👤 著者分析":
                     txt   = get_community_texts(comm, df)
                     if txt.strip():
                         comm_texts[label] = txt
-                    top3 = [a for a, _ in sorted(
+                    top5 = [a for a, _ in sorted(
                         cent_scores.items(), key=lambda x: x[1], reverse=True
-                    ) if a in comm][:3]
+                    ) if a in comm][:5]
                     comm_info_rows.append({
                         "コミュニティ": label,
                         "人数": len(comm),
-                        "主要著者（中心性上位3名）": ", ".join(top3),
+                        "主要著者（中心性上位5名）": ", ".join(top5),
                     })
                 st.dataframe(pd.DataFrame(comm_info_rows), use_container_width=True)
                 if comm_texts:
                     tfidf_chart(comm_texts, top_feat_n, "bigram",
-                                f"コミュニティ別 特徴語（Top{top_feat_n} bigram）")
+                                f"コミュニティ別 特徴語（Top{top_feat_n}）")
             else:
                 st.info("AB列がないためコミュニティ特徴語は表示できません。")
 
-            # ③ 期間比較
+            # ③ 期間比較（左: 前の期間／右: 直近の期間。新規ノード・新規エッジをハイライト）
             st.markdown("---")
             st.markdown("#### 期間比較ネットワーク")
             y_max_net = int(df["year"].dropna().max())
             recent_y  = list(range(y_max_net - span_net + 1, y_max_net + 1))
             prev_y    = list(range(y_max_net - span_net * 2 + 1, y_max_net - span_net + 1))
             st.caption(
-                f"直近{span_net}年: {recent_y[0]}〜{recent_y[-1]}"
-                f"　／　前{span_net}年: {prev_y[0]}〜{prev_y[-1]}"
+                f"左＝前{span_net}年: {prev_y[0]}〜{prev_y[-1]}"
+                f"　／　右＝直近{span_net}年: {recent_y[0]}〜{recent_y[-1]}"
+                "　｜　オレンジ＝直近期間で新たに登場した著者・共著関係"
             )
             G_rec  = build_coauthor_graph(df[df["year"].isin(recent_y)]["FAU"], top_n=top_n_co)
             G_prev = build_coauthor_graph(df[df["year"].isin(prev_y)]["FAU"],   top_n=top_n_co)
+
+            prev_node_set = set(G_prev.nodes())
+            prev_edge_set = set(frozenset(e) for e in G_prev.edges())
+            new_nodes_rec = set(G_rec.nodes()) - prev_node_set
+            new_edges_rec = [e for e in G_rec.edges() if frozenset(e) not in prev_edge_set]
+
             cc1, cc2 = st.columns(2)
             with cc1:
                 st.plotly_chart(
-                    nx_to_plotly(G_rec, centrality=cent_co,
-                                 title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）",
-                                 show_labels=show_lbl),
-                    use_container_width=True,
+                    nx_to_plotly_diff(G_prev, centrality="pagerank",
+                                       title=f"前{span_net}年（{prev_y[0]}〜{prev_y[-1]}）",
+                                       show_labels=show_lbl,
+                                       highlight_nodes=set(), highlight_edges=set()),
+                    use_container_width=True, key="co_network_prev",
                 )
             with cc2:
                 st.plotly_chart(
-                    nx_to_plotly(G_prev, centrality=cent_co,
-                                 title=f"前{span_net}年（{prev_y[0]}〜{prev_y[-1]}）",
-                                 show_labels=show_lbl),
-                    use_container_width=True,
+                    nx_to_plotly_diff(G_rec, centrality="pagerank",
+                                       title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）・新規をオレンジで表示",
+                                       show_labels=show_lbl,
+                                       highlight_nodes=new_nodes_rec,
+                                       highlight_edges=set(frozenset(e) for e in new_edges_rec)),
+                    use_container_width=True, key="co_network_recent",
                 )
 
             # 新規共著ペア
-            prev_edge_set = set(frozenset(e) for e in G_prev.edges())
             new_edge_rows = [
                 {"著者A": u, "著者B": v, "共著件数": int(data.get("weight", 1))}
                 for u, v, data in G_rec.edges(data=True)
