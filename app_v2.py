@@ -225,19 +225,23 @@ def tfidf_top(group_texts: dict, top_n: int, mode: str = "bigram") -> pd.DataFra
                 rows.append({"group": g, "term": display_term, "tfidf": scores[j]})
     return pd.DataFrame(rows)
 
-def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str):
+def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int = None):
     result = tfidf_top(group_texts, top_n, mode)
     if result.empty:
         st.info("データが不足しています。")
         return
     result = result.sort_values("tfidf", ascending=True)
     n_groups = result["group"].nunique()
+    # wrap未指定時：3列を上限に横並びし、4グループ以上は3列で折り返す（視認性重視）
+    facet_wrap = wrap if wrap is not None else min(n_groups, 3)
+    n_rows = math.ceil(n_groups / facet_wrap)
+    max_rows_per_group = result.groupby("group").size().max()
     row_h = 22  # 1行あたりの高さ（以前のMeSH特徴語と同等のサイズ感）
     fig = px.bar(
         result, x="tfidf", y="term", color="group",
-        facet_col="group", facet_col_wrap=2, orientation="h",
+        facet_col="group", facet_col_wrap=facet_wrap, orientation="h",
         labels={"tfidf": "TF-IDF", "term": ""}, title=title,
-        height=max(400, len(result) * row_h),
+        height=max(400, max_rows_per_group * row_h * n_rows + n_rows * 40),
     )
     fig.update_yaxes(
         matches=None, showticklabels=True,
@@ -342,7 +346,8 @@ def nx_to_plotly(G, centrality: str = "pagerank", title: str = "",
 def nx_to_plotly_diff(G, centrality: str = "pagerank", title: str = "",
                        show_labels: bool = True,
                        highlight_nodes: set = None, highlight_edges: set = None):
-    """期間比較ネットワーク用。新規ノード・新規エッジをオレンジで強調表示する。"""
+    """期間比較ネットワーク用。ノードはコミュニティ色で塗り、
+    新規ノード・新規エッジはオレンジの太枠／太線で強調表示する。"""
     highlight_nodes = highlight_nodes or set()
     highlight_edges = highlight_edges or set()
     if not G.nodes:
@@ -353,9 +358,19 @@ def nx_to_plotly_diff(G, centrality: str = "pagerank", title: str = "",
             else nx.betweenness_centrality(G, weight="weight"))
     max_cent = max(cent.values()) if cent else 1
 
-    NEW_COLOR = "#f39c12"      # 新規（オレンジ）
-    BASE_COLOR = "#95a5a6"     # 既存（グレー）
-    NEW_EDGE_COLOR = "#f39c12"
+    # コミュニティ検出（全期間ネットワークと同じロジック）
+    try:
+        from networkx.algorithms.community import greedy_modularity_communities
+        node_community = {}
+        for idx, com in enumerate(greedy_modularity_communities(G, weight="weight")):
+            for node in com:
+                node_community[node] = idx
+    except Exception:
+        node_community = {n: 0 for n in G.nodes}
+    palette = px.colors.qualitative.Plotly
+
+    NEW_OUTLINE = "#f39c12"     # 新規ノードの強調枠線（オレンジ）
+    NEW_EDGE_COLOR = "#f39c12"  # 新規エッジ（オレンジ太線）
     BASE_EDGE_COLOR = "#ccc"
 
     # エッジを「新規」「既存」に分けてそれぞれ描画（凡例に出すため）
@@ -368,15 +383,18 @@ def nx_to_plotly_diff(G, centrality: str = "pagerank", title: str = "",
         else:
             base_edge_x += [x0, x1, None]; base_edge_y += [y0, y1, None]
 
-    node_colors = [NEW_COLOR if n in highlight_nodes else BASE_COLOR for n in G.nodes]
-    node_line_w = [2 if n in highlight_nodes else 1 for n in G.nodes]
+    node_colors  = [palette[node_community.get(n, 0) % len(palette)] for n in G.nodes]
+    node_line_c  = [NEW_OUTLINE if n in highlight_nodes else "white" for n in G.nodes]
+    node_line_w  = [3 if n in highlight_nodes else 1 for n in G.nodes]
+    node_sizes   = [max(8, cent.get(n, 0) / max_cent * 40) + (4 if n in highlight_nodes else 0)
+                     for n in G.nodes]
 
     traces = [
         go.Scatter(x=base_edge_x, y=base_edge_y, mode="lines",
                    line=dict(width=0.7, color=BASE_EDGE_COLOR), hoverinfo="none",
                    name="既存の共著関係", showlegend=bool(base_edge_x)),
         go.Scatter(x=new_edge_x, y=new_edge_y, mode="lines",
-                   line=dict(width=1.8, color=NEW_EDGE_COLOR), hoverinfo="none",
+                   line=dict(width=2.2, color=NEW_EDGE_COLOR), hoverinfo="none",
                    name="新規の共著関係", showlegend=bool(new_edge_x)),
         go.Scatter(
             x=[pos[n][0] for n in G.nodes],
@@ -385,9 +403,9 @@ def nx_to_plotly_diff(G, centrality: str = "pagerank", title: str = "",
             text=list(G.nodes) if show_labels else [],
             textposition="top center", textfont=dict(size=9),
             marker=dict(
-                size=[max(8, cent.get(n, 0) / max_cent * 40) for n in G.nodes],
+                size=node_sizes,
                 color=node_colors,
-                line=dict(width=node_line_w, color="white"),
+                line=dict(width=node_line_w, color=node_line_c),
             ),
             hovertext=[f"{n}<br>centrality: {cent.get(n,0):.4f}"
                        + ("<br>★ 新規著者" if n in highlight_nodes else "") for n in G.nodes],
@@ -550,7 +568,6 @@ PAGES = [
     "📊 Overview",
     "📰 Journal分析",
     "🔥 ホットキーワード",
-    "🧬 MeSH分析",
     "👤 著者分析",
 ]
 page = st.sidebar.radio("ページ選択", PAGES)
@@ -590,8 +607,7 @@ if page == "🏠 Home":
 | 📂 Data Upload | ファイル読込・基礎統計・CSV出力 |
 | 📊 Overview | 文献数推移・Journalランキング・著者ランキング・バブルチャート |
 | 📰 Top Journal分析 | Journal推移（積み上げ）・bigram特徴語・MeSH特徴語 |
-| 🔥 Hot Keywords | 年度別特徴語・単語共起ネットワーク（3期間） |
-| 🧬 MeSH分析 | MeSHヒートマップ・バースト検知タイムライン |
+| 🔥 Hot Keywords | 年度別特徴語・MeSHヒートマップ・バースト検知タイムライン |
 | 👤 著者分析 | 著者別特徴語・共著ネットワーク・コミュニティ・期間比較 |
         """)
     st.info("⬅️ 左のサイドバーから「📂 Data Upload」を選んでください。")
@@ -921,7 +937,7 @@ elif page == "📰 Journal分析":
                 tfidf_chart(jm_texts, top_m_w, "word", f"Journal別 MeSH特徴語 Top{top_m_w}")
 
 # ═══════════════════════════════════════════════════════════════
-# ホットキーワード
+# ホットキーワード（MeSH分析を統合）
 # ═══════════════════════════════════════════════════════════════
 elif page == "🔥 ホットキーワード":
     st.markdown("## 🔥 Hot Keywords")
@@ -937,8 +953,20 @@ elif page == "🔥 ホットキーワード":
         SPAN   = st.slider("集約年数（1期間）", 1, 5, 3, key="hot_span")
         top_w3 = st.slider("表示フレーズ数", 5, 20, 10, key="hot_y_w")
         n_per  = st.slider("表示期間数", 2, 6, 4, key="hot_n_per")
+        st.markdown("---")
+        st.markdown("**MeSH 分析設定**")
+        if "MH" in df.columns:
+            top_mesh_n  = st.slider("ヒートマップ表示数", 20, 100, 60, key="mesh_top")
+            min_year_m  = st.slider("表示開始年",
+                                    int(df["year"].dropna().min()),
+                                    int(df["year"].dropna().max()),
+                                    max(int(df["year"].dropna().min()),
+                                        int(df["year"].dropna().max()) - 20),
+                                    key="mesh_miny")
+            burst_top_n = st.slider("バースト対象MeSH数", 10, 60, 30, key="burst_top")
+            burst_z_th  = st.slider("バースト Zスコア閾値", 0.5, 3.0, 1.5, 0.1, key="burst_z")
 
-    tab1, tab2 = st.tabs(["📅 年度別特徴語", "💬 単語共起ネットワーク"])
+    tab1, tab2, tab3 = st.tabs(["📅 年度別特徴語", "🌡️ MeSHヒートマップ", "💥 バースト検知"])
 
     # ── Tab1: 年度別 bigram特徴語 ────────────────────────────────
     with tab1:
@@ -959,175 +987,95 @@ elif page == "🔥 ホットキーワード":
             with st.expander("単語（参考）"):
                 tfidf_chart(periods, top_w3, "word", "年度別 特徴語 (word / TF-IDF)")
 
-    # ── Tab2: 単語共起ネットワーク（bigram・3期間比較）──────────
+    # ── Tab2: MeSHヒートマップ ────────────────────────────────────
     with tab2:
-        if "year" not in df.columns:
-            st.error("year 列が見つかりません。")
+        if "MH" not in df.columns:
+            st.error("MH（MeSH）列が見つかりません。")
         else:
-            cl2, cr2 = st.columns([1, 3])
-            with cl2:
-                period_span = st.slider("1期間の年数", 1, 5, 1, key="word_span")
-                top_edges   = st.slider("共起ペア上限", 40, 120, 80, key="word_edges")
-                cent_w      = st.selectbox("中心性指標", ["pagerank", "betweenness"], key="w_cent")
-                run_w       = st.button("🔍 分析実行", key="w_run")
+            mh_count = df["MH"].apply(lambda x: len(x) > 0).sum()
+            st.caption(f"MeSHデータあり文献: {mh_count:,} 件 / {len(df):,} 件")
+            with st.spinner("MeSHデータを集計中..."):
+                pivot_norm, mdf_all = build_mesh_pivot(df, top_mesh_n, min_year_m)
 
-            if run_w:
-                y_max_w = int(df["year"].dropna().max())
-                w_periods = []
-                for i in range(3):
-                    y_end   = y_max_w - i * period_span
-                    y_start = y_end - period_span + 1
-                    label   = f"{y_end}年" if period_span == 1 else f"{y_start}〜{y_end}年"
-                    w_periods.append((label, list(range(y_start, y_end + 1))))
-
-                compare_rows = []
-                for label, years in w_periods:
-                    texts_w = df[df["year"].isin(years)]["AB"].dropna().tolist()
-                    if not texts_w:
-                        with cr2:
-                            st.warning(f"{label}：この期間のデータがありません。")
-                        continue
-                    # ★ spinner と plotly_chart を同じ cr2 コンテキスト内で実行
-                    with cr2:
-                        st.markdown(f"##### {label}　（Abstract {len(texts_w)} 件）")
-                        with st.spinner(f"{label} 単語共起ネットワーク構築中..."):
-                            G_w = build_bigram_graph(texts_w, top_n=top_edges)
-                            fig_w = nx_to_plotly(
-                                G_w, centrality=cent_w,
-                                title=f"単語共起ネットワーク [bigram]　{label}",
-                                directed=True, show_labels=True,
-                            )
-                        st.plotly_chart(fig_w, use_container_width=True, key=f"hot_network_{label}")
-
-                    if G_w.nodes:
-                        scores = (nx.pagerank(G_w, weight="weight") if cent_w == "pagerank"
-                                  else nx.betweenness_centrality(G_w, weight="weight"))
-                        for rank, (word, _) in enumerate(
-                            sorted(scores.items(), key=lambda x: x[1], reverse=True)[:10], 1
-                        ):
-                            succs = [(v, G_w[word][v].get("weight", 0))
-                                     for v in G_w.successors(word)]
-                            display_term = (f"{word} {max(succs, key=lambda x: x[1])[0]}"
-                                            if succs else word)
-                            compare_rows.append({"期間": label, "rank": rank, "bigram": display_term})
-
-                if compare_rows:
-                    comp_df = (pd.DataFrame(compare_rows)
-                               .pivot(index="rank", columns="期間", values="bigram")
-                               .reindex(columns=[lbl for lbl, _ in w_periods]))
-                    comp_df.index.name = "順位"
-                    with cr2:
-                        st.markdown("#### 3期間 中心bigram 比較")
-                        st.dataframe(comp_df, use_container_width=True)
-
-# ═══════════════════════════════════════════════════════════════
-# MeSH分析
-# ═══════════════════════════════════════════════════════════════
-elif page == "🧬 MeSH分析":
-    st.markdown("## 🧬 MeSH・疾患概念分析")
-    if df is None:
-        st.warning("先に「📂 Data Upload」でデータをアップロードしてください。")
-        st.stop()
-    if "MH" not in df.columns:
-        st.error("MH（MeSH）列が見つかりません。")
-        st.stop()
-
-    mh_count = df["MH"].apply(lambda x: len(x) > 0).sum()
-    st.caption(f"MeSHデータあり文献: {mh_count:,} 件 / {len(df):,} 件")
-
-    tab1, tab2 = st.tabs(["🌡️ ヒートマップ", "💥 バースト検知"])
-
-    with st.sidebar:
-        st.markdown("**MeSH 分析設定**")
-        top_mesh_n  = st.slider("ヒートマップ表示数", 20, 100, 60, key="mesh_top")
-        min_year_m  = st.slider("表示開始年",
-                                int(df["year"].dropna().min()),
-                                int(df["year"].dropna().max()),
-                                max(int(df["year"].dropna().min()),
-                                    int(df["year"].dropna().max()) - 20),
-                                key="mesh_miny")
-        burst_top_n = st.slider("バースト対象MeSH数", 10, 60, 30, key="burst_top")
-        burst_z_th  = st.slider("バースト Zスコア閾値", 0.5, 3.0, 1.5, 0.1, key="burst_z")
-
-    with st.spinner("MeSHデータを集計中..."):
-        pivot_norm, mdf_all = build_mesh_pivot(df, top_mesh_n, min_year_m)
-
-    if pivot_norm.empty:
-        st.warning("条件に一致するMeSHデータがありません。")
-        st.stop()
-
-    with tab1:
-        fig_heat = go.Figure(data=go.Heatmap(
-            z=pivot_norm.T.values,
-            x=[str(y) for y in pivot_norm.index],
-            y=pivot_norm.columns.tolist(),
-            colorscale=[
-                [0.0, "#eaf4fb"], [0.2, "#aad4f0"],
-                [0.5, "#f5c842"], [0.75, "#f07b2a"], [1.0, "#c0392b"],
-            ],
-            colorbar=dict(title="出現率 (%)", thickness=14),
-            hoverongaps=False,
-            hovertemplate="年: %{x}<br>MeSH: %{y}<br>出現率: %{z:.2f}%<extra></extra>",
-        ))
-        fig_heat.update_layout(
-            title=f"MeSHターム 年別出現頻度ヒートマップ Top{top_mesh_n}（{min_year_m}年〜）",
-            xaxis=dict(title="Year", tickangle=-45),
-            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=10)),
-            height=max(500, top_mesh_n * 16),
-            margin=dict(l=300, r=60, t=60, b=60),
-        )
-        st.plotly_chart(fig_heat, use_container_width=True)
-        st.download_button("⬇️ ヒートマップデータ (CSV)",
-                           pivot_norm.T.reset_index().to_csv(index=False).encode(),
-                           "mesh_heatmap.csv", "text/csv")
-
-    with tab2:
-        with st.spinner("バースト検知中..."):
-            burst_df = detect_bursts(mdf_all, burst_top_n, min_year_m, burst_z_th)
-        if burst_df.empty:
-            st.info("バーストが検出されませんでした。Zスコア閾値を小さくしてみてください。")
-        else:
-            st.success(f"検出バースト数: {len(burst_df)} 件")
-            st.dataframe(burst_df, use_container_width=True)
-            fig_burst = go.Figure()
-            max_z = burst_df["最大Zスコア"].max()
-            cmap  = px.colors.sequential.YlOrRd
-            for _, brow in burst_df.iterrows():
-                ci = min(int(brow["最大Zスコア"] / max_z * (len(cmap) - 1)), len(cmap) - 1)
-                fig_burst.add_trace(go.Bar(
-                    x=[brow["期間"]], y=[brow["MeSH"]], orientation="h",
-                    base=brow["バースト開始"],
-                    marker=dict(color=cmap[ci], line=dict(width=0.5, color="white")),
-                    text=f"ピーク: {brow['ピーク年']}年 ({brow['ピーク件数']}件)",
-                    textposition="inside",
-                    hovertemplate=(
-                        f"<b>{brow['MeSH']}</b><br>"
-                        f"期間: {brow['バースト開始']}〜{brow['バースト終了']}年<br>"
-                        f"ピーク: {brow['ピーク年']}年 / {brow['ピーク件数']}件<br>"
-                        f"最大Zスコア: {brow['最大Zスコア']}<extra></extra>"
-                    ),
-                    showlegend=False,
+            if pivot_norm.empty:
+                st.warning("条件に一致するMeSHデータがありません。")
+            else:
+                fig_heat = go.Figure(data=go.Heatmap(
+                    z=pivot_norm.T.values,
+                    x=[str(y) for y in pivot_norm.index],
+                    y=pivot_norm.columns.tolist(),
+                    colorscale=[
+                        [0.0, "#eaf4fb"], [0.2, "#aad4f0"],
+                        [0.5, "#f5c842"], [0.75, "#f07b2a"], [1.0, "#c0392b"],
+                    ],
+                    colorbar=dict(title="出現率 (%)", thickness=14),
+                    hoverongaps=False,
+                    hovertemplate="年: %{x}<br>MeSH: %{y}<br>出現率: %{z:.2f}%<extra></extra>",
                 ))
-            fig_burst.add_trace(go.Scatter(
-                x=burst_df["ピーク年"], y=burst_df["MeSH"], mode="markers",
-                marker=dict(symbol="diamond", size=10, color="#2c3e50",
-                            line=dict(width=1, color="white")),
-                hovertemplate="ピーク年: %{x}<extra></extra>", name="ピーク年",
-            ))
-            fig_burst.update_layout(
-                title=f"MeSH バースト検知タイムライン（Zスコア閾値={burst_z_th}）",
-                xaxis=dict(title="Year",
-                           range=[min_year_m - 1, int(mdf_all["year"].max()) + 1], dtick=2),
-                yaxis=dict(title="", autorange="reversed", tickfont=dict(size=11)),
-                barmode="overlay",
-                height=max(420, len(burst_df) * 28 + 100),
-                margin=dict(l=300, r=60, t=60, b=60),
-                legend=dict(x=1.01, y=1),
-            )
-            st.plotly_chart(fig_burst, use_container_width=True)
-            st.download_button("⬇️ バースト検知結果 (CSV)",
-                               burst_df.to_csv(index=False).encode(),
-                               "mesh_burst.csv", "text/csv")
+                fig_heat.update_layout(
+                    title=f"MeSHターム 年別出現頻度ヒートマップ Top{top_mesh_n}（{min_year_m}年〜）",
+                    xaxis=dict(title="Year", tickangle=-45),
+                    yaxis=dict(title="", autorange="reversed", tickfont=dict(size=10)),
+                    height=max(500, top_mesh_n * 16),
+                    margin=dict(l=300, r=60, t=60, b=60),
+                )
+                st.plotly_chart(fig_heat, use_container_width=True)
+                st.download_button("⬇️ ヒートマップデータ (CSV)",
+                                   pivot_norm.T.reset_index().to_csv(index=False).encode(),
+                                   "mesh_heatmap.csv", "text/csv")
+
+    # ── Tab3: バースト検知 ──────────────────────────────────────
+    with tab3:
+        if "MH" not in df.columns:
+            st.error("MH（MeSH）列が見つかりません。")
+        else:
+            with st.spinner("バースト検知中..."):
+                burst_df = detect_bursts(mdf_all, burst_top_n, min_year_m, burst_z_th) \
+                           if not pivot_norm.empty else pd.DataFrame()
+            if burst_df.empty:
+                st.info("バーストが検出されませんでした。Zスコア閾値を小さくしてみてください。")
+            else:
+                st.success(f"検出バースト数: {len(burst_df)} 件")
+                st.dataframe(burst_df, use_container_width=True)
+                fig_burst = go.Figure()
+                max_z = burst_df["最大Zスコア"].max()
+                cmap  = px.colors.sequential.YlOrRd
+                for _, brow in burst_df.iterrows():
+                    ci = min(int(brow["最大Zスコア"] / max_z * (len(cmap) - 1)), len(cmap) - 1)
+                    fig_burst.add_trace(go.Bar(
+                        x=[brow["期間"]], y=[brow["MeSH"]], orientation="h",
+                        base=brow["バースト開始"],
+                        marker=dict(color=cmap[ci], line=dict(width=0.5, color="white")),
+                        text=f"ピーク: {brow['ピーク年']}年 ({brow['ピーク件数']}件)",
+                        textposition="inside",
+                        hovertemplate=(
+                            f"<b>{brow['MeSH']}</b><br>"
+                            f"期間: {brow['バースト開始']}〜{brow['バースト終了']}年<br>"
+                            f"ピーク: {brow['ピーク年']}年 / {brow['ピーク件数']}件<br>"
+                            f"最大Zスコア: {brow['最大Zスコア']}<extra></extra>"
+                        ),
+                        showlegend=False,
+                    ))
+                fig_burst.add_trace(go.Scatter(
+                    x=burst_df["ピーク年"], y=burst_df["MeSH"], mode="markers",
+                    marker=dict(symbol="diamond", size=10, color="#2c3e50",
+                                line=dict(width=1, color="white")),
+                    hovertemplate="ピーク年: %{x}<extra></extra>", name="ピーク年",
+                ))
+                fig_burst.update_layout(
+                    title=f"MeSH バースト検知タイムライン（Zスコア閾値={burst_z_th}）",
+                    xaxis=dict(title="Year",
+                               range=[min_year_m - 1, int(mdf_all["year"].max()) + 1], dtick=2),
+                    yaxis=dict(title="", autorange="reversed", tickfont=dict(size=11)),
+                    barmode="overlay",
+                    height=max(420, len(burst_df) * 28 + 100),
+                    margin=dict(l=300, r=60, t=60, b=60),
+                    legend=dict(x=1.01, y=1),
+                )
+                st.plotly_chart(fig_burst, use_container_width=True)
+                st.download_button("⬇️ バースト検知結果 (CSV)",
+                                   burst_df.to_csv(index=False).encode(),
+                                   "mesh_burst.csv", "text/csv")
 
 # ═══════════════════════════════════════════════════════════════
 # 著者分析
@@ -1255,7 +1203,7 @@ elif page == "👤 著者分析":
             st.caption(
                 f"左＝前{span_net}年: {prev_y[0]}〜{prev_y[-1]}"
                 f"　／　右＝直近{span_net}年: {recent_y[0]}〜{recent_y[-1]}"
-                "　｜　オレンジ＝直近期間で新たに登場した著者・共著関係"
+                "　｜　色＝コミュニティ／オレンジ枠＝直近期間で新たに登場した著者・共著関係"
             )
             G_rec  = build_coauthor_graph(df[df["year"].isin(recent_y)]["FAU"], top_n=top_n_co)
             G_prev = build_coauthor_graph(df[df["year"].isin(prev_y)]["FAU"],   top_n=top_n_co)
@@ -1264,6 +1212,20 @@ elif page == "👤 著者分析":
             prev_edge_set = set(frozenset(e) for e in G_prev.edges())
             new_nodes_rec = set(G_rec.nodes()) - prev_node_set
             new_edges_rec = [e for e in G_rec.edges() if frozenset(e) not in prev_edge_set]
+
+            # 中心性スコア（左右で同じ位置・同じ形式に揃えて表示）
+            pr_prev = nx.pagerank(G_prev, weight="weight") if G_prev.nodes else {}
+            pr_rec  = nx.pagerank(G_rec, weight="weight") if G_rec.nodes else {}
+            top_pr_prev = pd.DataFrame(
+                sorted(pr_prev.items(), key=lambda x: x[1], reverse=True)[:10],
+                columns=["著者", "pagerankスコア"]
+            )
+            top_pr_rec_rows = sorted(pr_rec.items(), key=lambda x: x[1], reverse=True)[:10]
+            top_pr_rec = pd.DataFrame(
+                [{"著者": ("🆕 " if a in new_nodes_rec else "") + a, "pagerankスコア": s}
+                 for a, s in top_pr_rec_rows],
+                columns=["著者", "pagerankスコア"]
+            )
 
             cc1, cc2 = st.columns(2)
             with cc1:
@@ -1274,15 +1236,19 @@ elif page == "👤 著者分析":
                                        highlight_nodes=set(), highlight_edges=set()),
                     use_container_width=True, key="co_network_prev",
                 )
+                st.caption("中心性スコア Top10（pagerank）")
+                st.dataframe(top_pr_prev, use_container_width=True, hide_index=True)
             with cc2:
                 st.plotly_chart(
                     nx_to_plotly_diff(G_rec, centrality="pagerank",
-                                       title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）・新規をオレンジで表示",
+                                       title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）",
                                        show_labels=show_lbl,
                                        highlight_nodes=new_nodes_rec,
                                        highlight_edges=set(frozenset(e) for e in new_edges_rec)),
                     use_container_width=True, key="co_network_recent",
                 )
+                st.caption("中心性スコア Top10（pagerank）　🆕＝新規著者")
+                st.dataframe(top_pr_rec, use_container_width=True, hide_index=True)
 
             # 新規共著ペア
             new_edge_rows = [
@@ -1295,6 +1261,38 @@ elif page == "👤 著者分析":
                           .sort_values("共著件数", ascending=False)
                           .reset_index(drop=True))
                 st.markdown(f"#### 新規共著ペア（直近{span_net}年に初登場）: {len(new_df)} ペア")
-                st.dataframe(new_df.head(30), use_container_width=True)
+
+                pair_col, mesh_col = st.columns([3, 2])
+                with pair_col:
+                    st.caption("新規共著ペア一覧")
+                    st.dataframe(new_df.head(30), use_container_width=True, hide_index=True)
+
+                with mesh_col:
+                    st.caption("新規共著ペアの文献に出現するMeSHターム Top10")
+                    if "MH" in df.columns:
+                        new_pair_authors = set()
+                        for u, v in zip(new_df["著者A"], new_df["著者B"]):
+                            new_pair_authors.add(u); new_pair_authors.add(v)
+                        recent_df = df[df["year"].isin(recent_y)]
+                        mesh_counter = Counter()
+                        for _, row in recent_df.iterrows():
+                            fau = row.get("FAU", [])
+                            if not isinstance(fau, list):
+                                continue
+                            authors_short = {shorten_name(a) for a in fau}
+                            if authors_short & new_pair_authors:
+                                for m in (row.get("MH") or []):
+                                    nm = normalize_mesh(m)
+                                    if nm not in MESH_EXCLUDE:
+                                        mesh_counter[nm] += 1
+                        if mesh_counter:
+                            mesh_top10 = pd.DataFrame(
+                                mesh_counter.most_common(10), columns=["MeSHターム", "件数"]
+                            )
+                            st.dataframe(mesh_top10, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("該当するMeSHデータがありません。")
+                    else:
+                        st.info("MH（MeSH）列がないため表示できません。")
             else:
                 st.info("新規共著ペアなし。")
