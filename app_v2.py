@@ -225,7 +225,8 @@ def tfidf_top(group_texts: dict, top_n: int, mode: str = "bigram") -> pd.DataFra
                 rows.append({"group": g, "term": display_term, "tfidf": scores[j]})
     return pd.DataFrame(rows)
 
-def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int = None):
+def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int = None,
+                 group_order: list = None):
     result = tfidf_top(group_texts, top_n, mode)
     if result.empty:
         st.info("データが不足しています。")
@@ -237,11 +238,17 @@ def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int 
     n_rows = math.ceil(n_groups / facet_wrap)
     max_rows_per_group = result.groupby("group").size().max()
     row_h = 22  # 1行あたりの高さ（以前のMeSH特徴語と同等のサイズ感）
+    category_orders = {}
+    if group_order:
+        # 実際に存在するグループのみ・指定順を維持
+        present = set(result["group"].unique())
+        category_orders["group"] = [g for g in group_order if g in present]
     fig = px.bar(
         result, x="tfidf", y="term", color="group",
         facet_col="group", facet_col_wrap=facet_wrap, orientation="h",
         labels={"tfidf": "TF-IDF", "term": ""}, title=title,
         height=max(400, max_rows_per_group * row_h * n_rows + n_rows * 40),
+        category_orders=category_orders or None,
     )
     fig.update_yaxes(
         matches=None, showticklabels=True,
@@ -433,6 +440,37 @@ def get_community_texts(community_nodes, df_src):
             texts.append(str(row["AB"]))
     return " ".join(texts)
 
+@st.cache_data
+def build_author_affiliation_map(df_src: pd.DataFrame) -> dict:
+    """
+    著者の短縮名 → 所属（AD）の対応辞書を作る。
+    PubMed/MEDLINE形式では AD は文献単位の情報のため、
+    各著者が関わった文献のADのうち最も頻出するものをその著者の所属とみなす。
+    AD列が存在しない場合は空の辞書を返す。
+    """
+    if "AD" not in df_src.columns:
+        return {}
+    affil_counter: dict = {}
+    for _, row in df_src.iterrows():
+        fau = row.get("FAU", [])
+        ad  = row.get("AD", [])
+        if not isinstance(fau, list) or not fau:
+            continue
+        if isinstance(ad, list):
+            ad_text = ad[0] if ad else None
+        else:
+            ad_text = ad
+        if not ad_text or pd.isna(ad_text):
+            continue
+        # 所属の先頭部分（最初のカンマ区切り or セミコロン区切りまで）を主所属として扱う
+        short_affil = re.split(r"[;,]", str(ad_text))[0].strip()
+        if not short_affil:
+            continue
+        for a in fau:
+            key = shorten_name(a)
+            affil_counter.setdefault(key, Counter())[short_affil] += 1
+    return {k: v.most_common(1)[0][0] for k, v in affil_counter.items()}
+
 # ═══════════════════════════════════════════════════════════════
 # MeSH ヘルパー
 # ═══════════════════════════════════════════════════════════════
@@ -523,26 +561,36 @@ if "df" not in st.session_state:
 @st.cache_data
 def load_logo_b64():
     """
-    assets/logo.png（推奨）またはアプリ直下の logo.png / logo.jpg を探して
-    base64文字列を返す。見つからなければ None。
-    会社ロゴを差し替えたい場合は、このファイルと同じ階層の
-    assets/logo.png を置き換えるだけでよい。
-    """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(base_dir, "assets", "logo.png"),
-        os.path.join(base_dir, "assets", "logo.jpg"),
-        os.path.join(base_dir, "logo.png"),
-        os.path.join(base_dir, "logo.jpg"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            ext = "jpeg" if path.lower().endswith(("jpg", "jpeg")) else "png"
-            with open(path, "rb") as f:
-                return base64.b64encode(f.read()).decode(), ext
-    return None, None
+    assets/logo.png（推奨）またはリポジトリ直下の logo.png / logo.jpg を探して
+    base64文字列を返す。見つからなければ (None, None, 探索したパス一覧) を返す。
+    会社ロゴを差し替えたい場合は、assets/logo.png を置き換えるだけでよい。
 
-_logo_b64, _logo_ext = load_logo_b64()
+    実行環境（Streamlit Cloud / Colab / ローカル）によって __file__ の基準位置と
+    カレントディレクトリがずれることがあるため、両方を起点に探索する。
+    """
+    search_bases = []
+    try:
+        search_bases.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    search_bases.append(os.getcwd())
+
+    filenames = ["logo.png", "logo.jpg", "logo.jpeg", "logo.PNG", "logo.JPG"]
+    sub_dirs = ["assets", ""]
+
+    tried = []
+    for base in search_bases:
+        for sub in sub_dirs:
+            for fname in filenames:
+                path = os.path.join(base, sub, fname) if sub else os.path.join(base, fname)
+                tried.append(path)
+                if os.path.exists(path):
+                    ext = "jpeg" if path.lower().endswith(("jpg", "jpeg")) else "png"
+                    with open(path, "rb") as f:
+                        return base64.b64encode(f.read()).decode(), ext, tried
+    return None, None, tried
+
+_logo_b64, _logo_ext, _logo_tried_paths = load_logo_b64()
 
 with st.sidebar:
     if _logo_b64:
@@ -558,6 +606,11 @@ with st.sidebar:
             '<div class="sidebar-logo-box"><span class="sidebar-brand">📚 文献Analyzer</span></div>',
             unsafe_allow_html=True,
         )
+        with st.expander("ロゴが見つかりません（クリックで詳細）", expanded=False):
+            st.caption("以下のパスを探しましたが見つかりませんでした。"
+                       "assets/logo.png がリポジトリに含まれているか（git push 済みか）を確認してください。")
+            for p in _logo_tried_paths:
+                st.code(p, language=None)
 
 # ═══════════════════════════════════════════════════════════════
 # ナビゲーション
@@ -966,29 +1019,10 @@ elif page == "🔥 ホットキーワード":
             burst_top_n = st.slider("バースト対象MeSH数", 10, 60, 30, key="burst_top")
             burst_z_th  = st.slider("バースト Zスコア閾値", 0.5, 3.0, 1.5, 0.1, key="burst_z")
 
-    tab1, tab2, tab3 = st.tabs(["📅 年度別特徴語", "🌡️ MeSHヒートマップ", "💥 バースト検知"])
+    tab1, tab2, tab3 = st.tabs(["🌡️ MeSHヒートマップ", "📅 年度別特徴語", "💥 バースト検知"])
 
-    # ── Tab1: 年度別 bigram特徴語 ────────────────────────────────
+    # ── Tab1: MeSHヒートマップ ────────────────────────────────────
     with tab1:
-        if "year" not in df.columns:
-            st.error("year 列が見つかりません。")
-        else:
-            ynlp = df.dropna(subset=["year", "AB"]).copy()
-            ynlp["year"] = ynlp["year"].astype(int)
-            ym = ynlp["year"].max()
-            periods = {}
-            for i in range(n_per):
-                y_end = ym - i * SPAN; y_start = y_end - SPAN + 1
-                label = str(y_end) if SPAN == 1 else f"{y_end}〜{y_start}"
-                subset = ynlp[ynlp["year"].isin(range(y_start, y_end + 1))]["AB"].tolist()
-                if subset:
-                    periods[label] = " ".join(subset)
-            tfidf_chart(periods, top_w3, "bigram", "年度別 特徴語 (bigram / TF-IDF)")
-            with st.expander("単語（参考）"):
-                tfidf_chart(periods, top_w3, "word", "年度別 特徴語 (word / TF-IDF)")
-
-    # ── Tab2: MeSHヒートマップ ────────────────────────────────────
-    with tab2:
         if "MH" not in df.columns:
             st.error("MH（MeSH）列が見つかりません。")
         else:
@@ -1023,6 +1057,25 @@ elif page == "🔥 ホットキーワード":
                 st.download_button("⬇️ ヒートマップデータ (CSV)",
                                    pivot_norm.T.reset_index().to_csv(index=False).encode(),
                                    "mesh_heatmap.csv", "text/csv")
+
+    # ── Tab2: 年度別 bigram特徴語 ────────────────────────────────
+    with tab2:
+        if "year" not in df.columns:
+            st.error("year 列が見つかりません。")
+        else:
+            ynlp = df.dropna(subset=["year", "AB"]).copy()
+            ynlp["year"] = ynlp["year"].astype(int)
+            ym = ynlp["year"].max()
+            periods = {}
+            for i in range(n_per):
+                y_end = ym - i * SPAN; y_start = y_end - SPAN + 1
+                label = str(y_end) if SPAN == 1 else f"{y_end}〜{y_start}"
+                subset = ynlp[ynlp["year"].isin(range(y_start, y_end + 1))]["AB"].tolist()
+                if subset:
+                    periods[label] = " ".join(subset)
+            tfidf_chart(periods, top_w3, "bigram", "年度別 特徴語 (bigram / TF-IDF)")
+            with st.expander("単語（参考）"):
+                tfidf_chart(periods, top_w3, "word", "年度別 特徴語 (word / TF-IDF)")
 
     # ── Tab3: バースト検知 ──────────────────────────────────────
     with tab3:
@@ -1163,94 +1216,126 @@ elif page == "👤 著者分析":
             # コミュニティ抽出は pagerank スコアを使って主要著者を決める
             cent_scores = pr_scores
 
-            # ② コミュニティ別特徴語
+            # ② コミュニティ分析
             st.markdown("---")
-            st.markdown("#### コミュニティ別 特徴語")
+            st.markdown("#### コミュニティ分析")
             if "AB" in df.columns:
                 from networkx.algorithms.community import greedy_modularity_communities
                 comms = list(greedy_modularity_communities(G_co, weight="weight"))
                 comms = sorted([c for c in comms if len(c) >= 3], key=len, reverse=True)
                 st.caption(f"検出コミュニティ数（3名以上）: {len(comms)}")
 
+                affil_map = build_author_affiliation_map(df)
+
                 comm_texts = {}
+                comm_label_order = []
                 comm_info_rows = []
                 for i, comm in enumerate(comms[:top_comm_n]):
                     label = f"Comm {i+1}（{len(comm)}名）"
+                    comm_label_order.append(label)
                     txt   = get_community_texts(comm, df)
                     if txt.strip():
                         comm_texts[label] = txt
                     top5 = [a for a, _ in sorted(
                         cent_scores.items(), key=lambda x: x[1], reverse=True
                     ) if a in comm][:5]
+                    top5_affils = [affil_map.get(a, "―") for a in top5]
                     comm_info_rows.append({
                         "コミュニティ": label,
                         "人数": len(comm),
                         "主要著者（中心性上位5名）": ", ".join(top5),
+                        "主要著者の所属": " / ".join(top5_affils) if affil_map else "（AD列なし）",
                     })
                 st.dataframe(pd.DataFrame(comm_info_rows), use_container_width=True)
                 if comm_texts:
+                    # Comm1, Comm2... の順番で並ぶように facet_col_wrap・category順を明示
                     tfidf_chart(comm_texts, top_feat_n, "bigram",
-                                f"コミュニティ別 特徴語（Top{top_feat_n}）")
+                                f"コミュニティ別 特徴語（Top{top_feat_n} / TF-IDF）",
+                                group_order=comm_label_order)
             else:
                 st.info("AB列がないためコミュニティ特徴語は表示できません。")
 
-            # ③ 期間比較（左: 前の期間／右: 直近の期間。新規ノード・新規エッジをハイライト）
+            # ③ 期間比較（左: 直近span_net年より前の全期間／右: 直近年までの全期間。新規ノード・新規エッジをハイライト）
             st.markdown("---")
             st.markdown("#### 期間比較ネットワーク")
+            y_min_net = int(df["year"].dropna().min())
             y_max_net = int(df["year"].dropna().max())
-            recent_y  = list(range(y_max_net - span_net + 1, y_max_net + 1))
-            prev_y    = list(range(y_max_net - span_net * 2 + 1, y_max_net - span_net + 1))
+            boundary_y = y_max_net - span_net + 1   # 例: span_net=3, y_max=2026 → 2024
+            prev_y    = list(range(y_min_net, boundary_y))        # 例: 〜2023年まで
+            recent_y  = list(range(y_min_net, y_max_net + 1))     # 例: 〜2026年まで（全期間）
             st.caption(
-                f"左＝前{span_net}年: {prev_y[0]}〜{prev_y[-1]}"
-                f"　／　右＝直近{span_net}年: {recent_y[0]}〜{recent_y[-1]}"
-                "　｜　色＝コミュニティ／オレンジ枠＝直近期間で新たに登場した著者・共著関係"
+                f"左＝{boundary_y - 1}年まで: {prev_y[0] if prev_y else '―'}〜{prev_y[-1] if prev_y else '―'}"
+                f"　／　右＝直近まで: {recent_y[0]}〜{recent_y[-1]}（直近{span_net}年分を含む全期間）"
+                "　｜　色＝コミュニティ／オレンジ枠＝直近の追加期間で新たに登場した著者・共著関係"
             )
             G_rec  = build_coauthor_graph(df[df["year"].isin(recent_y)]["FAU"], top_n=top_n_co)
-            G_prev = build_coauthor_graph(df[df["year"].isin(prev_y)]["FAU"],   top_n=top_n_co)
+            G_prev = build_coauthor_graph(df[df["year"].isin(prev_y)]["FAU"],   top_n=top_n_co) \
+                     if prev_y else nx.Graph()
 
             prev_node_set = set(G_prev.nodes())
             prev_edge_set = set(frozenset(e) for e in G_prev.edges())
             new_nodes_rec = set(G_rec.nodes()) - prev_node_set
             new_edges_rec = [e for e in G_rec.edges() if frozenset(e) not in prev_edge_set]
 
-            # 中心性スコア（左右で同じ位置・同じ形式に揃えて表示）
-            pr_prev = nx.pagerank(G_prev, weight="weight") if G_prev.nodes else {}
-            pr_rec  = nx.pagerank(G_rec, weight="weight") if G_rec.nodes else {}
-            top_pr_prev = pd.DataFrame(
-                sorted(pr_prev.items(), key=lambda x: x[1], reverse=True)[:10],
-                columns=["著者", "pagerankスコア"]
-            )
-            top_pr_rec_rows = sorted(pr_rec.items(), key=lambda x: x[1], reverse=True)[:10]
-            top_pr_rec = pd.DataFrame(
-                [{"著者": ("🆕 " if a in new_nodes_rec else "") + a, "pagerankスコア": s}
-                 for a, s in top_pr_rec_rows],
-                columns=["著者", "pagerankスコア"]
-            )
+            # 中心性スコア（pagerank・betweenness 両方をTop10で表示。左右で同じ位置・同じ形式に揃える）
+            def _top10_both(G):
+                if not G.nodes:
+                    return pd.DataFrame(columns=["著者", "pagerankスコア"]), \
+                           pd.DataFrame(columns=["著者", "betweennessスコア"])
+                pr = nx.pagerank(G, weight="weight")
+                bw = nx.betweenness_centrality(G, weight="weight")
+                pr_df = pd.DataFrame(sorted(pr.items(), key=lambda x: x[1], reverse=True)[:10],
+                                      columns=["著者", "pagerankスコア"])
+                bw_df = pd.DataFrame(sorted(bw.items(), key=lambda x: x[1], reverse=True)[:10],
+                                      columns=["著者", "betweennessスコア"])
+                return pr_df, bw_df
+
+            top_pr_prev, top_bw_prev = _top10_both(G_prev)
+            top_pr_rec,  top_bw_rec  = _top10_both(G_rec)
+            # 直近側は新規著者がわかるようにマーク
+            if not top_pr_rec.empty:
+                top_pr_rec["著者"] = top_pr_rec["著者"].apply(
+                    lambda a: ("🆕 " if a in new_nodes_rec else "") + a)
+            if not top_bw_rec.empty:
+                top_bw_rec["著者"] = top_bw_rec["著者"].apply(
+                    lambda a: ("🆕 " if a in new_nodes_rec else "") + a)
 
             cc1, cc2 = st.columns(2)
             with cc1:
                 st.plotly_chart(
                     nx_to_plotly_diff(G_prev, centrality="pagerank",
-                                       title=f"前{span_net}年（{prev_y[0]}〜{prev_y[-1]}）",
+                                       title=f"{boundary_y - 1}年まで（{prev_y[0] if prev_y else '―'}〜{prev_y[-1] if prev_y else '―'}）",
                                        show_labels=show_lbl,
                                        highlight_nodes=set(), highlight_edges=set()),
                     use_container_width=True, key="co_network_prev",
                 )
-                st.caption("中心性スコア Top10（pagerank）")
-                st.dataframe(top_pr_prev, use_container_width=True, hide_index=True)
+                st.caption("中心性スコア Top10")
+                pr_col1, bw_col1 = st.columns(2)
+                with pr_col1:
+                    st.caption("pagerank")
+                    st.dataframe(top_pr_prev, use_container_width=True, hide_index=True)
+                with bw_col1:
+                    st.caption("betweenness")
+                    st.dataframe(top_bw_prev, use_container_width=True, hide_index=True)
             with cc2:
                 st.plotly_chart(
                     nx_to_plotly_diff(G_rec, centrality="pagerank",
-                                       title=f"直近{span_net}年（{recent_y[0]}〜{recent_y[-1]}）",
+                                       title=f"直近まで（{recent_y[0]}〜{recent_y[-1]}）",
                                        show_labels=show_lbl,
                                        highlight_nodes=new_nodes_rec,
                                        highlight_edges=set(frozenset(e) for e in new_edges_rec)),
                     use_container_width=True, key="co_network_recent",
                 )
-                st.caption("中心性スコア Top10（pagerank）　🆕＝新規著者")
-                st.dataframe(top_pr_rec, use_container_width=True, hide_index=True)
+                st.caption("中心性スコア Top10　🆕＝新規著者")
+                pr_col2, bw_col2 = st.columns(2)
+                with pr_col2:
+                    st.caption("pagerank")
+                    st.dataframe(top_pr_rec, use_container_width=True, hide_index=True)
+                with bw_col2:
+                    st.caption("betweenness")
+                    st.dataframe(top_bw_rec, use_container_width=True, hide_index=True)
 
-            # 新規共著ペア
+            # 新規共著ペア（共著件数 ＋ そのペアの共著文献に出現するMeSHターム件数 Top10 を同じ表に）
             new_edge_rows = [
                 {"著者A": u, "著者B": v, "共著件数": int(data.get("weight", 1))}
                 for u, v, data in G_rec.edges(data=True)
@@ -1260,39 +1345,35 @@ elif page == "👤 著者分析":
                 new_df = (pd.DataFrame(new_edge_rows)
                           .sort_values("共著件数", ascending=False)
                           .reset_index(drop=True))
-                st.markdown(f"#### 新規共著ペア（直近{span_net}年に初登場）: {len(new_df)} ペア")
+                st.markdown(f"#### 新規共著ペア（{boundary_y}年以降に初登場）: {len(new_df)} ペア")
 
-                pair_col, mesh_col = st.columns([3, 2])
-                with pair_col:
-                    st.caption("新規共著ペア一覧")
-                    st.dataframe(new_df.head(30), use_container_width=True, hide_index=True)
-
-                with mesh_col:
-                    st.caption("新規共著ペアの文献に出現するMeSHターム Top10")
-                    if "MH" in df.columns:
-                        new_pair_authors = set()
-                        for u, v in zip(new_df["著者A"], new_df["著者B"]):
-                            new_pair_authors.add(u); new_pair_authors.add(v)
-                        recent_df = df[df["year"].isin(recent_y)]
+                if "MH" in df.columns:
+                    recent_df = df[df["year"].isin(recent_y)]
+                    mesh_top10_col = []
+                    for u, v in zip(new_df["著者A"], new_df["著者B"]):
+                        # そのペア（u と v が両方とも著者リストに含まれる文献）のみを対象にMeSHを集計
                         mesh_counter = Counter()
                         for _, row in recent_df.iterrows():
                             fau = row.get("FAU", [])
                             if not isinstance(fau, list):
                                 continue
                             authors_short = {shorten_name(a) for a in fau}
-                            if authors_short & new_pair_authors:
+                            if {u, v} <= authors_short:
                                 for m in (row.get("MH") or []):
                                     nm = normalize_mesh(m)
                                     if nm not in MESH_EXCLUDE:
                                         mesh_counter[nm] += 1
                         if mesh_counter:
-                            mesh_top10 = pd.DataFrame(
-                                mesh_counter.most_common(10), columns=["MeSHターム", "件数"]
+                            top10_str = ", ".join(
+                                f"{term}({cnt})" for term, cnt in mesh_counter.most_common(10)
                             )
-                            st.dataframe(mesh_top10, use_container_width=True, hide_index=True)
                         else:
-                            st.info("該当するMeSHデータがありません。")
-                    else:
-                        st.info("MH（MeSH）列がないため表示できません。")
+                            top10_str = "―"
+                        mesh_top10_col.append(top10_str)
+                    new_df["MeSHターム Top10（件数）"] = mesh_top10_col
+                else:
+                    new_df["MeSHターム Top10（件数）"] = "（MH列なし）"
+
+                st.dataframe(new_df.head(30), use_container_width=True, hide_index=True)
             else:
                 st.info("新規共著ペアなし。")
