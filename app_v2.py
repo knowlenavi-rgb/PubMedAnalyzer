@@ -53,18 +53,19 @@ st.markdown(f"""
     }}
 
     .stApp {{ background: {BG}; }}
-    .block-container {{ padding-top: 1.2rem; max-width: 1320px; }}
+    .block-container {{ padding-top: 2.2rem; max-width: 1320px; }}
 
     /* ── 見出し ──────────────────────────────────────────── */
     h1 {{
         color: {INK}; font-weight: 800; letter-spacing: -0.02em;
+        line-height: 1.35; padding-top: 0.15em; margin-top: 0;
     }}
     h2 {{
         color: {INK}; font-weight: 700; letter-spacing: -0.01em;
         border-bottom: 2px solid {TEAL}; padding-bottom: 0.4rem;
-        margin-top: 0.2rem;
+        line-height: 1.4; padding-top: 0.1em; margin-top: 0.2rem;
     }}
-    h3, h4 {{ color: {INK_SOFT}; font-weight: 600; }}
+    h3, h4 {{ color: {INK_SOFT}; font-weight: 600; line-height: 1.4; }}
 
     /* ── サイドバー ──────────────────────────────────────── */
     section[data-testid="stSidebar"] {{
@@ -231,27 +232,28 @@ def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str):
         return
     result = result.sort_values("tfidf", ascending=True)
     n_groups = result["group"].nunique()
-    row_h = 30  # 1行あたりの高さを大きく
+    row_h = 22  # 1行あたりの高さ（以前のMeSH特徴語と同等のサイズ感）
     fig = px.bar(
         result, x="tfidf", y="term", color="group",
         facet_col="group", facet_col_wrap=2, orientation="h",
         labels={"tfidf": "TF-IDF", "term": ""}, title=title,
-        height=max(480, len(result) * row_h + n_groups * 60),
+        height=max(400, len(result) * row_h),
     )
     fig.update_yaxes(
         matches=None, showticklabels=True,
         categoryorder="total ascending",
-        tickfont=dict(size=13),   # ★ y軸（bigram）ラベルを大きく
+        tickfont=dict(size=11),
     )
-    fig.update_xaxes(tickfont=dict(size=12))
+    fig.update_xaxes(tickfont=dict(size=11))
     fig.update_layout(
         showlegend=False,
-        title_font=dict(size=15),
+        title_font=dict(size=14),
+        margin=dict(t=60, b=20),
     )
     # facetタイトルのプレフィックス除去 & フォント拡大
     fig.for_each_annotation(lambda a: a.update(
         text=a.text.split("=")[-1],
-        font=dict(size=15, color="#2c3e50"),
+        font=dict(size=13, color="#2c3e50"),
     ))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -496,17 +498,39 @@ def detect_bursts(mdf: pd.DataFrame, top_n: int, min_year: int, z_th: float):
 # ═══════════════════════════════════════════════════════════════
 if "df" not in st.session_state:
     st.session_state.df = None
-if "logo_b64" not in st.session_state:
-    st.session_state.logo_b64 = None
 
 # ═══════════════════════════════════════════════════════════════
-# サイドバー：ロゴ
+# サイドバー：ロゴ（アプリと同じフォルダ内の画像ファイルを自動表示）
 # ═══════════════════════════════════════════════════════════════
+@st.cache_data
+def load_logo_b64():
+    """
+    assets/logo.png（推奨）またはアプリ直下の logo.png / logo.jpg を探して
+    base64文字列を返す。見つからなければ None。
+    会社ロゴを差し替えたい場合は、このファイルと同じ階層の
+    assets/logo.png を置き換えるだけでよい。
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "assets", "logo.png"),
+        os.path.join(base_dir, "assets", "logo.jpg"),
+        os.path.join(base_dir, "logo.png"),
+        os.path.join(base_dir, "logo.jpg"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            ext = "jpeg" if path.lower().endswith(("jpg", "jpeg")) else "png"
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode(), ext
+    return None, None
+
+_logo_b64, _logo_ext = load_logo_b64()
+
 with st.sidebar:
-    if st.session_state.logo_b64:
+    if _logo_b64:
         st.markdown(
             f"""<div class="sidebar-logo-box">
-                    <img src="data:image/png;base64,{st.session_state.logo_b64}" />
+                    <img src="data:image/{_logo_ext};base64,{_logo_b64}" />
                     <span class="sidebar-brand">文献Analyzer</span>
                 </div>""",
             unsafe_allow_html=True,
@@ -516,17 +540,6 @@ with st.sidebar:
             '<div class="sidebar-logo-box"><span class="sidebar-brand">📚 文献Analyzer</span></div>',
             unsafe_allow_html=True,
         )
-    with st.expander("🏷️ 自社ロゴを設定", expanded=False):
-        logo_file = st.file_uploader(
-            "ロゴ画像（PNG / JPG）", type=["png", "jpg", "jpeg"], key="logo_uploader",
-            help="アップロードしたロゴはこのセッション中、サイドバー上部に表示されます。",
-        )
-        if logo_file is not None:
-            st.session_state.logo_b64 = base64.b64encode(logo_file.read()).decode()
-            st.rerun()
-        if st.session_state.logo_b64 and st.button("ロゴを削除", key="logo_clear"):
-            st.session_state.logo_b64 = None
-            st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
 # ナビゲーション
@@ -713,6 +726,21 @@ elif page == "📊 Overview":
         st.warning("先に「📂 Data Upload」でデータをアップロードしてください。")
         st.stop()
 
+    yd_all = df.dropna(subset=["year"]).copy() if "year" in df.columns else pd.DataFrame()
+    if not yd_all.empty:
+        yd_all["year"] = yd_all["year"].astype(int)
+        y_min, y_max = int(yd_all["year"].min()), int(yd_all["year"].max())
+    else:
+        y_min, y_max = 2000, 2024
+
+    with st.sidebar:
+        st.markdown("**Overview 設定**")
+        yr = st.slider("期間変更（文献数推移）", y_min, y_max,
+                       (max(y_min, y_max - 30), y_max), key="ov_yr_slider")
+        TOP_J  = st.slider("表示Journal数（Top Journals）", 5, 30, 15, key="ov_top_j")
+        TOP_AU = st.slider("表示著者数（Top Authors）", 10, 30, 20, key="ov_top_au")
+        TOP_BB = st.slider("表示著者数（著者推移）", 10, 30, 20, key="ov_bb_n")
+
     tab1, tab2, tab3, tab4 = st.tabs(
         ["📈 文献数推移", "📰 Top Journals", "👥 Top Authors", "🫧 著者推移"]
     )
@@ -720,11 +748,7 @@ elif page == "📊 Overview":
     # ── Tab1: 文献数推移 ─────────────────────────────────────────
     with tab1:
         if "year" in df.columns:
-            yd = df.dropna(subset=["year"]).copy()
-            yd["year"] = yd["year"].astype(int)
-            y_min, y_max = int(yd["year"].min()), int(yd["year"].max())
-            yr = st.slider("期間変更", y_min, y_max, (max(y_min, y_max - 30), y_max), key="ov_yr_slider")
-            yd_f = yd[(yd["year"] >= yr[0]) & (yd["year"] <= yr[1])]
+            yd_f = yd_all[(yd_all["year"] >= yr[0]) & (yd_all["year"] <= yr[1])]
             year_counts = yd_f.groupby("year").size().reset_index(name="文献数")
             fig_yr = px.bar(
                 year_counts, x="year", y="文献数",
@@ -739,7 +763,6 @@ elif page == "📊 Overview":
     # ── Tab2: Top Journals ──────────────────────────────────────
     with tab2:
         if "TA" in df.columns:
-            TOP_J = st.slider("表示Journal数", 5, 30, 15, key="ov_top_j")
             jdf = df.dropna(subset=["TA"]).copy()
             top_j = jdf["TA"].value_counts().head(TOP_J).reset_index()
             top_j.columns = ["Journal", "総文献数"]
@@ -753,7 +776,6 @@ elif page == "📊 Overview":
                 height=max(400, TOP_J * 26),
             )
             st.plotly_chart(fig_ja, use_container_width=True)
-            st.dataframe(top_j.reset_index(drop=True), use_container_width=True)
             st.download_button("⬇️ top_journals.csv",
                                top_j.to_csv(index=False).encode(),
                                "top_journals.csv", "text/csv")
@@ -761,7 +783,6 @@ elif page == "📊 Overview":
     # ── Tab3: Top Authors ────────────────────────────────────────
     with tab3:
         if "FAU" in df.columns:
-            TOP_AU = st.slider("表示著者数", 10, 30, 20, key="ov_top_au")
             all_au, first_au, last_au = [], [], []
             for authors in df["FAU"]:
                 if isinstance(authors, list) and authors:
@@ -781,18 +802,10 @@ elif page == "📊 Overview":
                                  color_discrete_sequence=[clr], title=ttl, height=500)
                     fig.update_layout(yaxis=dict(categoryorder="total ascending"))
                     st.plotly_chart(fig, use_container_width=True, key=f"ov_author_{ttl}")
-            st.markdown("#### 著者ランキング統合テーブル")
-            merged = (co.merge(fst, on="Author", how="outer")
-                        .merge(lst, on="Author", how="outer")
-                        .fillna(0)
-                        .sort_values("Co-author数", ascending=False)
-                        .head(TOP_AU).reset_index(drop=True))
-            st.dataframe(merged, use_container_width=True)
 
     # ── Tab4: 著者バブル ────────────────────────────────────────
     with tab4:
         if "FAU" in df.columns and "year" in df.columns:
-            TOP_BB = st.slider("表示著者数", 10, 30, 20, key="ov_bb_n")
             rows = [{"year": r["year"], "author": shorten_name(a)}
                     for _, r in df.iterrows() for a in (r.get("FAU") or [])]
             auyr = pd.DataFrame(rows).dropna()
