@@ -146,22 +146,37 @@ st.markdown(f"""
 # ═══════════════════════════════════════════════════════════════
 # 認証
 # ═══════════════════════════════════════════════════════════════
+def _to_plain_dict(obj):
+    """
+    st.secrets が返す Secrets/AttrDict 型を、json.dumps に頼らず
+    再帰的に素の dict / list / str に変換する。
+    （Secrets型は dict 互換だが json.dumps にそのまま渡すと
+      TypeError: Object of type Secrets is not JSON serializable
+      になることがあるための対策）
+    """
+    if hasattr(obj, "items"):
+        return {k: _to_plain_dict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_plain_dict(v) for v in obj]
+    return obj
+
+
 def load_auth_config():
     """
     認証情報の読み込み優先順位:
       1. Streamlit Cloud Secrets の st.secrets["PUBMED_APP_CONFIG"]（本番想定）
       2. ローカルの config.yaml（ローカル開発専用。.gitignore 対象）
-    どちらにも見つからない場合は None を返す（＝アプリを起動させない）。
+    どちらにも見つからない場合は (None, None, エラーメッセージ) を返す。
     """
     # ① Secrets（本番）
-    try:
-        if "PUBMED_APP_CONFIG" in st.secrets:
+    if "PUBMED_APP_CONFIG" in st.secrets:
+        try:
             raw = st.secrets["PUBMED_APP_CONFIG"]
-            # st.secrets は TOML をそのまま dict ライクに返すので、そのまま辞書化する
-            cfg = json.loads(json.dumps(raw))
-            return cfg, "secrets"
-    except Exception:
-        pass
+            cfg = _to_plain_dict(raw)
+            return cfg, "secrets", None
+        except Exception as e:
+            # ここで握りつぶさず、原因をそのまま持ち帰る
+            return None, None, f"Secrets の読み込み中にエラー: {type(e).__name__}: {e}"
 
     # ② ローカル config.yaml（フォールバック。本番運用では使わない想定）
     local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml") \
@@ -170,14 +185,17 @@ def load_auth_config():
         try:
             with open(local_path, "r", encoding="utf-8") as f:
                 cfg = yaml.load(f, Loader=SafeLoader)
-            return cfg, "local_yaml"
-        except Exception:
-            pass
+            return cfg, "local_yaml", None
+        except Exception as e:
+            return None, None, f"config.yaml の読み込み中にエラー: {type(e).__name__}: {e}"
 
-    return None, None
+    return None, None, (
+        "st.secrets に 'PUBMED_APP_CONFIG' が見つからず、"
+        "config.yaml も存在しませんでした。"
+    )
 
 
-_auth_cfg, _auth_source = load_auth_config()
+_auth_cfg, _auth_source, _auth_error = load_auth_config()
 
 if _auth_cfg is None:
     st.error(
@@ -186,6 +204,12 @@ if _auth_cfg is None:
         "`PUBMED_APP_CONFIG`（TOML形式）を登録するか、ローカル開発時は "
         "`config.yaml` を配置してください。詳細は公開手順書を参照してください。"
     )
+    with st.expander("🛠️ 管理者向け：詳細なエラー内容", expanded=True):
+        st.code(_auth_error or "(詳細不明)", language=None)
+        st.caption(
+            "上記のメッセージを確認してください。TOMLの構文エラー（クォートの不一致など）や、"
+            "キー名の誤り（PUBMED_APP_CONFIG）が典型的な原因です。"
+        )
     st.stop()
 
 try:
@@ -193,8 +217,10 @@ try:
     _cookie_name   = _auth_cfg["cookie"]["name"]
     _cookie_key    = _auth_cfg["cookie"]["key"]
     _cookie_expiry = float(_auth_cfg["cookie"].get("expiry_days", 7))
-except (KeyError, TypeError):
+except (KeyError, TypeError) as e:
     st.error("🔒 認証設定の形式が不正です。`credentials` / `cookie` の構造を確認してください。")
+    with st.expander("🛠️ 管理者向け：詳細なエラー内容", expanded=True):
+        st.code(f"{type(e).__name__}: {e}", language=None)
     st.stop()
 
 authenticator = stauth.Authenticate(
