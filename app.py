@@ -7,7 +7,6 @@ import copy
 from collections import Counter
 import nltk
 from nltk.corpus import stopwords
-from sklearn.feature_extraction.text import TfidfVectorizer
 import plotly.express as px
 import plotly.graph_objects as go
 import networkx as nx
@@ -317,11 +316,20 @@ def tokenize(text: str):
     return [w for w in words if w not in STOP_EN and len(w) > 2 and not w.isdigit()]
 
 def make_bigrams(text: str):
-    words = tokenize(text)
+    # 重要: 先にストップワードを除去してから隣接ペアを作ってはいけない。
+    # 除去後に偶然隣り合っただけの無関係な単語同士（例: "disease is a common"
+    # → "is a" 除去後に disease/common が隣接）がペアになり、ノイズの原因になる。
+    # 元の文中で実際に隣接していた単語ペア（コロケーション）だけを残すため、
+    # 「生の単語列からまず隣接ペアを作り、両方ともストップワードでないペアのみ残す」
+    # という順序にする（R/tidytext版の bind_tf_idf と同じアプローチ）。
+    raw_words = re.findall(r"[a-z]+(?:-[a-z]+)*", text.lower())
     bigrams = []
-    for i in range(len(words) - 1):
-        w1, w2 = words[i], words[i + 1]
-        if w1 == w2:  # 同一単語の繰り返し（意味のないペア）は除外
+    for i in range(len(raw_words) - 1):
+        w1, w2 = raw_words[i], raw_words[i + 1]
+        if (w1 in STOP_EN or w2 in STOP_EN
+                or len(w1) <= 2 or len(w2) <= 2
+                or w1.isdigit() or w2.isdigit()
+                or w1 == w2):  # 同一単語の繰り返しは除外
             continue
         # アンダースコア結合で TfidfVectorizer がトークン分割しないようにする
         bigrams.append(f"{w1}_{w2}")
@@ -335,149 +343,54 @@ def pretokenize(text: str):
     return [w for w in text.split() if w]
 
 def tfidf_top(group_texts: dict, top_n: int, mode: str = "bigram") -> pd.DataFrame:
+    """
+    tf-idf の計算式は R の tidytext::bind_tf_idf と同じ定義に合わせている:
+      tf  = そのグループ内でのその語の出現回数 ÷ そのグループの総語数（相対頻度）
+      idf = ln(全グループ数 ÷ その語が出現するグループ数)（平滑化なし）
+      tf_idf = tf × idf
+
+    scikit-learn の TfidfVectorizer のデフォルト（tf=生カウント、
+    idf に +1 のスムージングを加える、結果をL2正規化する）を使うと、
+    全グループに共通して頻出する語のidfが下がりきらず、結果としてtf（頻度）の
+    影響が支配的になり、「そのグループに特有の語」が埋もれてしまう問題があった。
+    そのため、グループ間の違いがより際立つ tidytext 互換の式に統一している。
+    """
     groups = list(group_texts.keys())
     func   = {"word": tokenize, "bigram": make_bigrams, "pretoken": pretokenize}[mode]
-    processed = [" ".join(func(group_texts[g])) for g in groups]
-    if not any(processed):
+
+    group_term_counts = {g: Counter(func(group_texts[g])) for g in groups}
+    if not any(group_term_counts.values()):
         return pd.DataFrame(columns=["group", "term", "tfidf"])
-    # bigram/pretoken はアンダースコア結合済みなのでトークナイザをそのまま使う
-    vec = TfidfVectorizer(max_features=5000, token_pattern=r"[^\s]+")
-    try:
-        X = vec.fit_transform(processed)
-    except ValueError:
-        return pd.DataFrame(columns=["group", "term", "tfidf"])
-    terms = vec.get_feature_names_out()
+
+    all_terms = set()
+    for c in group_term_counts.values():
+        all_terms.update(c.keys())
+
+    n_groups = len(groups)
+    doc_freq = {
+        t: sum(1 for g in groups if group_term_counts[g].get(t, 0) > 0)
+        for t in all_terms
+    }
+
     rows = []
-    for i, g in enumerate(groups):
-        scores = X[i].toarray()[0]
-        for j in scores.argsort()[::-1][:top_n]:
-            if scores[j] > 0:
-                # bigram/pretoken: アンダースコアをスペースに戻して表示
-                display_term = terms[j].replace("_", " ") if mode in ("bigram", "pretoken") else terms[j]
-                rows.append({"group": g, "term": display_term, "tfidf": scores[j]})
+    for g in groups:
+        counts = group_term_counts[g]
+        total_words = sum(counts.values())
+        if total_words == 0:
+            continue
+        scores = []
+        for t, cnt in counts.items():
+            tf = cnt / total_words
+            idf = math.log(n_groups / doc_freq[t]) if doc_freq[t] > 0 else 0.0
+            scores.append((t, tf * idf))
+        scores.sort(key=lambda x: x[1], reverse=True)
+        for t, score in scores[:top_n]:
+            if score <= 0:
+                continue
+            display_term = t.replace("_", " ") if mode in ("bigram", "pretoken") else t
+            rows.append({"group": g, "term": display_term, "tfidf": score})
     return pd.DataFrame(rows)
 
-
-def _term_doc_rates(group_docs: dict, top_n: int, mode: str):
-    """
-    各グループについて、フレーズ（bigram/word/pretoken）の「文献あたり出現率(%)」を計算する。
-    1文献内で複数回出現しても1件としてカウントする（出現率として解釈しやすくするため）。
-    戻り値: {group: {term: rate(%)}}, term一覧（全グループのTF-IDF上位語の和集合）
-    """
-    func = {"word": tokenize, "bigram": make_bigrams, "pretoken": pretokenize}[mode]
-    group_rates = {}
-    for g, docs in group_docs.items():
-        n_docs = len(docs)
-        if n_docs == 0:
-            group_rates[g] = {}
-            continue
-        counter = Counter()
-        for doc in docs:
-            counter.update(set(func(doc)))
-        group_rates[g] = {t: cnt / n_docs * 100 for t, cnt in counter.items()}
-
-    # 注目フレーズの選定: 各グループのTF-IDF上位語を集めて和集合にする
-    group_texts_joined = {g: " ".join(docs) for g, docs in group_docs.items()}
-    tfidf_result = tfidf_top(group_texts_joined, top_n, mode)
-    if mode in ("bigram", "pretoken"):
-        focus_terms = set(tfidf_result["term"].str.replace(" ", "_")) if not tfidf_result.empty else set()
-    else:
-        focus_terms = set(tfidf_result["term"]) if not tfidf_result.empty else set()
-    return group_rates, focus_terms
-
-
-def lift_heatmap_chart(group_docs: dict, top_n: int, mode: str, title: str,
-                        group_order: list = None, min_baseline: float = 0.5):
-    """
-    ③ハイブリッド案: 期間×フレーズのヒートマップに「直近グループのベースラインからの
-    乖離度（pt）」バッジを添えた一覧表。
-    group_docs のキー順（または group_order 指定順）の最後のグループを「直近」とみなし、
-    全グループの平均出現率をベースラインとして直近グループの乖離を計算する。
-    戻り値: 表示したフレーズ一覧（KWICタブの候補に使う）
-    """
-    groups = group_order if group_order else list(group_docs.keys())
-    groups = [g for g in groups if g in group_docs]
-    if len(groups) < 2:
-        st.info("比較には2グループ以上が必要です。")
-        return []
-
-    group_rates, focus_terms = _term_doc_rates(group_docs, top_n, mode)
-    if not focus_terms:
-        st.info("データが不足しています。")
-        return []
-
-    baseline = {t: sum(group_rates[g].get(t, 0) for g in groups) / len(groups) for t in focus_terms}
-    latest = groups[-1]
-    rows = []
-    for t in focus_terms:
-        if baseline[t] < min_baseline:
-            continue
-        latest_rate = group_rates[latest].get(t, 0)
-        rows.append({
-            "term": t.replace("_", " ") if mode in ("bigram", "pretoken") else t,
-            "lift": latest_rate - baseline[t],
-            **{g: group_rates[g].get(t, 0) for g in groups},
-        })
-    if not rows:
-        st.info("十分な出現頻度のフレーズが見つかりませんでした。")
-        return []
-
-    rows.sort(key=lambda r: r["lift"], reverse=True)
-    rows = rows[:top_n]
-
-    max_val = max(max(r[g] for g in groups) for r in rows) or 1
-
-    def _cell_color(v):
-        ratio = min(v / max_val, 1)
-        r = round(225 - ratio * (225 - 29))
-        g_ = round(243 - ratio * (243 - 126))
-        b = round(238 - ratio * (238 - 93))
-        return f"rgb({r},{g_},{b})"
-
-    def _badge(lift):
-        if lift >= 3:
-            bg, fg = "#9FE1CB", "#085041"
-        elif lift >= 1:
-            bg, fg = "#9FE1CB", "#0F6E56"
-        elif lift > -1:
-            bg, fg = "#F1EFE8", "#5F5E5A"
-        else:
-            bg, fg = "#F5C4B3", "#993C1D"
-        sign = "+" if lift >= 0 else ""
-        return f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:{bg};color:{fg};font-weight:600;">{sign}{lift:.1f}pt</span>'
-
-    header_cells = "".join(
-        f'<th style="text-align:center;padding:6px 8px;border-bottom:1px solid #e3e8ee;'
-        f'color:#5a6b7d;font-weight:600;width:80px;">{g}</th>' for g in groups
-    )
-    body_rows = ""
-    for r in rows:
-        cells = "".join(
-            f'<td style="padding:6px 8px;border-bottom:1px solid #e3e8ee;text-align:center;'
-            f'background:{_cell_color(r[g])};color:#04342C;">{r[g]:.1f}%</td>' for g in groups
-        )
-        body_rows += (
-            f'<tr><td style="padding:6px 8px;border-bottom:1px solid #e3e8ee;">{r["term"]}</td>'
-            f'{cells}'
-            f'<td style="padding:6px 8px;border-bottom:1px solid #e3e8ee;text-align:center;">{_badge(r["lift"])}</td></tr>'
-        )
-
-    html_table = f"""
-    <div style="font-weight:600; font-size:0.95rem; margin-bottom:4px;">{title}</div>
-    <div style="font-size:0.78rem; color:#5a6b7d; margin-bottom:8px;">
-        色の濃淡＝出現率の高さ　｜　右端バッジ＝直近（{latest}）のベースラインからの乖離
-    </div>
-    <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
-        <thead><tr>
-            <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e3e8ee;color:#5a6b7d;font-weight:600;">フレーズ</th>
-            {header_cells}
-            <th style="text-align:center;padding:6px 8px;border-bottom:1px solid #e3e8ee;color:#5a6b7d;font-weight:600;width:100px;">直近の乖離</th>
-        </tr></thead>
-        <tbody>{body_rows}</tbody>
-    </table>
-    """
-    st.markdown(html_table, unsafe_allow_html=True)
-    return [r["term"] for r in rows]
 
 
 def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int = None,
@@ -524,119 +437,22 @@ def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int 
     st.plotly_chart(fig, use_container_width=True)
 
 
-def kwic_extract(doc_text: str, term_words: list, window: int = 8):
-    """
-    1つの文献テキストから指定フレーズ（単語のリスト）を探し、
-    前後 window 単語を含む文脈（前文脈, マッチ部分, 後文脈）のリストを返す。
-    """
-    raw_words = re.findall(r"[A-Za-z][A-Za-z\-]*|[.,;:]", doc_text)
-    lower_words = [w.lower() for w in raw_words]
-    n = len(term_words)
-    if n == 0:
-        return []
-    matches = []
-    for i in range(len(lower_words) - n + 1):
-        if lower_words[i:i + n] == term_words:
-            start = max(0, i - window)
-            end = min(len(raw_words), i + n + window)
-            before = " ".join(raw_words[start:i])
-            matched = " ".join(raw_words[i:i + n])
-            after = " ".join(raw_words[i + n:end])
-            matches.append((before, matched, after))
-    return matches
-
-
-def kwic_panel(group_docs: dict, key_prefix: str, candidate_terms: list, max_hits: int = 8,
-               mode: str = "bigram", title_lookup: dict = None):
-    """
-    フレーズを選択すると、各グループの文献からその文脈（KWIC）を抽出して表示する。
-    candidate_terms: ドロップダウンに出すフレーズの候補（表示用、スペース区切り）。
-    mode="pretoken"（MeSHタームなど、文章ではなく語句リストが docs に入っている場合）は
-    前後文脈の代わりに、そのタームを含む文献のタイトル一覧を表示する。
-    title_lookup: pretoken時に使う {元のdocs内テキスト断片を含む文献のインデックス -> タイトル} は
-    呼び出し側で個別に管理しないため、ここでは group_docs と同じ並びの title リストを別途渡す想定。
-    """
-    if not candidate_terms:
-        st.info("候補となるフレーズが見つかりませんでした。")
-        return
-    selected = st.selectbox("文脈を見るフレーズを選択", candidate_terms, key=f"{key_prefix}_kwic_term")
-    if not selected:
-        return
-
-    if mode == "pretoken":
-        # MeSHタームなど文章でない場合: そのタームを含む文献のタイトルを列挙する
-        selected_key = selected.replace(" ", "_")
-        for g, docs in group_docs.items():
-            titles = title_lookup.get(g, []) if title_lookup else []
-            hit_titles = [
-                titles[i] for i, doc in enumerate(docs)
-                if i < len(titles) and selected_key in doc.split()
-            ]
-            if not hit_titles:
-                continue
-            st.markdown(f"**{g}**　（{len(hit_titles)}件中、最大{max_hits}件を表示）")
-            for t in hit_titles[:max_hits]:
-                st.markdown(
-                    f'<div style="font-size:0.82rem; line-height:1.5; padding:6px 10px; '
-                    f'margin-bottom:4px; background:#f7f9fb; border-radius:8px;">{t}</div>',
-                    unsafe_allow_html=True,
-                )
-        return
-
-    term_words = selected.lower().split()
-
-    for g, docs in group_docs.items():
-        hits = []
-        for doc in docs:
-            if not isinstance(doc, str) or not doc.strip():
-                continue
-            hits.extend(kwic_extract(doc, term_words))
-            if len(hits) >= max_hits:
-                break
-        if not hits:
-            continue
-        st.markdown(f"**{g}**　（{len(hits)}件中、最大{max_hits}件を表示）")
-        for before, matched, after in hits[:max_hits]:
-            st.markdown(
-                f'<div style="display:flex; align-items:baseline; font-size:0.82rem; '
-                f'line-height:1.5; padding:6px 10px; margin-bottom:4px; '
-                f'background:#f7f9fb; border-radius:8px;">'
-                f'<span style="color:#9aa5b1; text-align:right; width:38%; flex-shrink:0; '
-                f'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">…{before}</span>'
-                f'<span style="font-weight:700; color:#16202c; padding:0 6px; white-space:nowrap;">{matched}</span>'
-                f'<span style="color:#9aa5b1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{after}…</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-
 def feature_word_panel(group_docs: dict, top_n: int, mode: str, title: str,
                         key_prefix: str, group_order: list = None, wrap: int = None,
                         title_lookup: dict = None):
     """
-    特徴語まわりの表示一式（TF-IDFグラフ／推移+乖離ヒートマップ／KWIC文脈）を
-    タブでまとめた共通パネル。group_docs はグループ名 -> 生テキストのリスト。
-    title_lookup: mode="pretoken" の場合に、group_docs と同じ並びの文献タイトルを
-    {group: [titles...]} の形で渡す（KWICタブでタイトル一覧を出すために使用）。
+    特徴語のTF-IDFグラフを表示する。
+    group_docs はグループ名 -> 生テキストのリスト。
+    （以前は「推移＋乖離」「文脈(KWIC)」タブも含んでいたが、tf-idf計算式を
+     R/tidytext互換に修正したことでグループ間の違いがTF-IDFだけで明確に出る
+     ようになったため、シンプルにTF-IDF表示のみとした。
+     key_prefix・title_lookup は当時KWICタブ用に使っていた名残で、
+     現在は未使用だが呼び出し側の互換性のため引数として残してある）
     """
     group_texts_joined = {g: " ".join(docs) for g, docs in group_docs.items()}
-    tfidf_result = tfidf_top(group_texts_joined, top_n, mode)
-    tfidf_terms = tfidf_result["term"].unique().tolist() if not tfidf_result.empty else []
+    tfidf_chart(group_texts_joined, top_n, mode, title, wrap=wrap, group_order=group_order)
 
-    tab_tfidf, tab_lift, tab_kwic = st.tabs(["📊 TF-IDF", "📈 推移＋乖離", "🔍 文脈(KWIC)"])
 
-    with tab_tfidf:
-        tfidf_chart(group_texts_joined, top_n, mode, title, wrap=wrap, group_order=group_order)
-
-    with tab_lift:
-        lift_terms = lift_heatmap_chart(group_docs, top_n, mode,
-                                        f"{title}（推移と直近の乖離）", group_order=group_order)
-
-    with tab_kwic:
-        # TF-IDFタブ・乖離タブどちらの上位語からでも選べるよう候補をマージする
-        candidates = sorted(set((lift_terms or []) + tfidf_terms))
-        kwic_panel(group_docs, key_prefix, candidate_terms=candidates,
-                   mode=mode, title_lookup=title_lookup)
 
 # ═══════════════════════════════════════════════════════════════
 # ネットワーク ヘルパー
@@ -1426,23 +1242,19 @@ elif page == "📰 Journal分析":
             top_jm = jmesh["TA"].value_counts().head(top_j_m).index.tolist()
 
             # 文献ごとに MeSH タームをスペース区切りの「文書」として扱う
-            # （title_lookup は同じ並びで文献タイトルを保持し、KWICタブでの一覧表示に使う）
             jm_docs = {j: [] for j in top_jm}
-            jm_titles = {j: [] for j in top_jm}
             for _, row in jmesh[jmesh["TA"].isin(top_jm)].iterrows():
                 terms = [normalize_mesh(m) for m in row["MH"] if normalize_mesh(m) not in MESH_EXCLUDE]
                 if terms:
                     jm_docs[row["TA"]].append(" ".join(t.replace(" ", "_") for t in terms))
-                    jm_titles[row["TA"]].append(str(row.get("TI", "（タイトルなし）")))
             jm_docs = {j: docs for j, docs in jm_docs.items() if docs}
-            jm_titles = {j: t for j, t in jm_titles.items() if j in jm_docs}
             if not jm_docs:
                 st.info("MeSHデータが見つかりません。")
             else:
                 # pretokenモードで渡す（MeSH語句はアンダースコア結合済みなので1トークン扱い、
                 # tokenize() を経由させずそのままTF-IDFにかける）
                 feature_word_panel(jm_docs, top_m_w, "pretoken", f"Journal別 MeSH特徴語 Top{top_m_w}",
-                                   key_prefix="jnl_mesh", group_order=top_jm, title_lookup=jm_titles)
+                                   key_prefix="jnl_mesh", group_order=top_jm)
 
 # ═══════════════════════════════════════════════════════════════
 # ホットキーワード（MeSH分析を統合）
@@ -1529,7 +1341,7 @@ elif page == "🔥 ホットキーワード":
                 if subset:
                     periods_docs[label] = subset
                     period_order.append(label)
-            # 推移＋乖離タブでは「直近期間が基準」になるよう古い→新しい順に並べ替える
+            # グラフ上で古い→新しい順（時系列順）に並ぶよう並べ替える
             period_order_chrono = list(reversed(period_order))
             feature_word_panel(periods_docs, top_w3, "bigram", "年度別 特徴語 (bigram)",
                                key_prefix="hot_yearly", group_order=period_order_chrono)
