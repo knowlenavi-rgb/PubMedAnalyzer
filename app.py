@@ -139,6 +139,11 @@ st.markdown(f"""
     div[data-testid="stExpander"] {{
         border: 1px solid #e3e8ee; border-radius: 10px;
     }}
+    /* 列数の多い表・長文を含む表は横スクロールで全体を確認できるようにする */
+    div[data-testid="stDataFrame"] {{
+        max-width: 100%;
+        overflow-x: auto !important;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -410,7 +415,13 @@ def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int 
     if group_order:
         # 実際に存在するグループのみ・指定順を維持
         present = set(result["group"].unique())
-        category_orders["group"] = [g for g in group_order if g in present]
+        ordered = [g for g in group_order if g in present]
+        # Plotly Express の既知の仕様: facet_col_wrap 使用時は行の積み上がる順序が
+        # 反転する（最初に並べた行が一番下に描画される）。見た目の上から下に
+        # 指定順（例: Top Journal の文献数が多い順）で並ぶよう、列数ぶんのチャンクに
+        # 分割してチャンクの順序を反転させてから渡す。
+        chunks = [ordered[i:i + facet_wrap] for i in range(0, len(ordered), facet_wrap)]
+        category_orders["group"] = [g for chunk in reversed(chunks) for g in chunk]
     fig = px.bar(
         result, x="tfidf", y="term", color="group",
         facet_col="group", facet_col_wrap=facet_wrap, orientation="h",
@@ -1008,7 +1019,7 @@ elif page == "📂 Data Upload":
         # ── データプレビュー ───────────────────────────────────
         st.markdown("### データプレビュー（先頭10件）")
         preview_cols = [c for c in ["PMID", "TI", "TA", "DP", "year", "AB"] if c in df.columns]
-        st.dataframe(df[preview_cols].head(10), use_container_width=True)
+        st.dataframe(df[preview_cols].head(10), use_container_width=False)
 
         # ── 整形データ ダウンロード ──────────────────────────────
         st.markdown("### 整形データのダウンロード")
@@ -1018,7 +1029,7 @@ elif page == "📂 Data Upload":
         with c1:
             st.markdown("**① 基本情報**")
             basic_df = df[basic_cols].copy()
-            st.dataframe(basic_df.head(8), use_container_width=True)
+            st.dataframe(basic_df.head(8), use_container_width=False)
             st.download_button("⬇️ basic_information.csv",
                                basic_df.to_csv(index=False).encode(),
                                "basic_information.csv", "text/csv")
@@ -1027,7 +1038,7 @@ elif page == "📂 Data Upload":
             st.markdown("**② Abstract**")
             if "AB" in df.columns:
                 ab_df = df[["PMID", "AB"]].dropna(subset=["AB"])
-                st.dataframe(ab_df.head(8), use_container_width=True)
+                st.dataframe(ab_df.head(8), use_container_width=False)
                 st.download_button("⬇️ abstract.csv",
                                    ab_df.to_csv(index=False).encode(),
                                    "abstract.csv", "text/csv")
@@ -1048,7 +1059,7 @@ elif page == "📂 Data Upload":
                     key=lambda x: int(x)
                 )
                 author_df = author_df[["PMID", "DP"] + num_cols]
-                st.dataframe(author_df.head(8), use_container_width=True)
+                st.dataframe(author_df.head(8), use_container_width=False)
                 st.download_button("⬇️ author.csv",
                                    author_df.to_csv(index=False).encode(),
                                    "author.csv", "text/csv")
@@ -1128,6 +1139,10 @@ elif page == "📊 Overview":
             co  = pd.DataFrame(Counter(all_au).most_common(TOP_AU),  columns=["Author", "Co-author数"])
             fst = pd.DataFrame(Counter(first_au).most_common(TOP_AU), columns=["Author", "1st Author数"])
             lst = pd.DataFrame(Counter(last_au).most_common(TOP_AU),  columns=["Author", "Last Author数"])
+
+            # ネットワーク分析と同じ所属マップを使い、バーにホバーすると所属が出るようにする
+            ov_affil_map = build_author_affiliation_map(df) if "AD" in df.columns else {}
+
             c1, c2, c3 = st.columns(3)
             for col_st, data, xcol, clr, ttl in [
                 (c1, co,  "Co-author数",  "#e74c3c", f"Co-author Top{TOP_AU}"),
@@ -1135,10 +1150,18 @@ elif page == "📊 Overview":
                 (c3, lst, "Last Author数","#9b59b6", f"Last Author Top{TOP_AU}"),
             ]:
                 with col_st:
+                    data = data.copy()
+                    data["所属"] = data["Author"].map(lambda a: ov_affil_map.get(a, "（所属情報なし）"))
                     fig = px.bar(data, x=xcol, y="Author", orientation="h",
-                                 color_discrete_sequence=[clr], title=ttl, height=500)
+                                 color_discrete_sequence=[clr], title=ttl, height=500,
+                                 custom_data=["所属"])
+                    fig.update_traces(
+                        hovertemplate="<b>%{y}</b><br>所属: %{customdata[0]}<br>" + xcol + ": %{x}<extra></extra>"
+                    )
                     fig.update_layout(yaxis=dict(categoryorder="total ascending"))
                     st.plotly_chart(fig, use_container_width=True, key=f"ov_author_{ttl}")
+            if not ov_affil_map:
+                st.caption("※ AD（所属）列が見つからないため、所属情報は表示されません。")
 
     # ── Tab4: 著者バブル ────────────────────────────────────────
     with tab4:
@@ -1269,7 +1292,7 @@ elif page == "🔥 ホットキーワード":
         st.stop()
 
     with st.sidebar.expander("⚙️ Hot Keywords 設定", expanded=True):
-        SPAN   = st.slider("集約年数（1期間）", 1, 5, 3, key="hot_span")
+        SPAN   = st.slider("集約年数（1期間）", 1, 5, 2, key="hot_span")
         top_w3 = st.slider("表示フレーズ数", 5, 20, 10, key="hot_y_w")
         n_per  = st.slider("表示期間数", 2, 6, 4, key="hot_n_per")
 
@@ -1361,7 +1384,7 @@ elif page == "🔥 ホットキーワード":
                 st.info("バーストが検出されませんでした。Zスコア閾値を小さくしてみてください。")
             else:
                 st.success(f"検出バースト数: {len(burst_df)} 件")
-                st.dataframe(burst_df, use_container_width=True)
+                st.dataframe(burst_df, use_container_width=False)
                 fig_burst = go.Figure()
                 max_z = burst_df["最大Zスコア"].max()
                 cmap  = px.colors.sequential.YlOrRd
@@ -1433,15 +1456,37 @@ elif page == "👤 著者分析":
         if "AB" not in df.columns:
             st.error("AB（Abstract）列が見つかりません。")
         else:
-            au_rows = [{"author": shorten_name(r["FAU"][0]), "AB": r["AB"]}
-                       for _, r in df.iterrows()
-                       if isinstance(r.get("FAU"), list) and r["FAU"] and pd.notna(r.get("AB"))]
-            au_df2 = pd.DataFrame(au_rows)
-            if not au_df2.empty:
-                top6a = au_df2["author"].value_counts().head(top_a_n).index.tolist()
-                a_docs = {a: au_df2[au_df2["author"] == a]["AB"].tolist() for a in top6a}
-                feature_word_panel(a_docs, top_w2, "bigram", "著者別 特徴語 (bigram)",
-                                   key_prefix="au_feat", group_order=top6a)
+            # 1st Author（筆頭著者）基準: 各文献の最初の著者をその文献の代表とする
+            # Overview の「Top Authors」の 1st Author ランキングと同じ基準
+            au_rows_1st = [{"author": shorten_name(r["FAU"][0]), "AB": r["AB"]}
+                           for _, r in df.iterrows()
+                           if isinstance(r.get("FAU"), list) and r["FAU"] and pd.notna(r.get("AB"))]
+            au_df_1st = pd.DataFrame(au_rows_1st)
+
+            # Co-author（全著者）基準: 文献に名を連ねる全著者をそれぞれカウント
+            au_rows_co = [{"author": shorten_name(a), "AB": r["AB"]}
+                          for _, r in df.iterrows() if isinstance(r.get("FAU"), list) and pd.notna(r.get("AB"))
+                          for a in r["FAU"]]
+            au_df_co = pd.DataFrame(au_rows_co)
+
+            st.markdown("#### 1st Author（筆頭著者）基準")
+            if not au_df_1st.empty:
+                top6_1st = au_df_1st["author"].value_counts().head(top_a_n).index.tolist()
+                a_docs_1st = {a: au_df_1st[au_df_1st["author"] == a]["AB"].tolist() for a in top6_1st}
+                feature_word_panel(a_docs_1st, top_w2, "bigram", "著者別 特徴語 (1st Author / bigram)",
+                                   key_prefix="au_feat_1st", group_order=top6_1st)
+            else:
+                st.info("1st Authorのデータがありません。")
+
+            st.markdown("---")
+            st.markdown("#### Co-author（全著者）基準")
+            if not au_df_co.empty:
+                top6_co = au_df_co["author"].value_counts().head(top_a_n).index.tolist()
+                a_docs_co = {a: au_df_co[au_df_co["author"] == a]["AB"].tolist() for a in top6_co}
+                feature_word_panel(a_docs_co, top_w2, "bigram", "著者別 特徴語 (Co-author / bigram)",
+                                   key_prefix="au_feat_co", group_order=top6_co)
+            else:
+                st.info("Co-authorのデータがありません。")
 
     # ── Tab2: 共著ネットワーク（3部構成）────────────────────────
     with tab2:
@@ -1519,7 +1564,7 @@ elif page == "👤 著者分析":
                         "主要著者（中心性上位5名）": ", ".join(top5),
                         "主要著者の所属": " / ".join(top5_affils) if affil_map else "（AD列なし）",
                     })
-                st.dataframe(pd.DataFrame(comm_info_rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(comm_info_rows), use_container_width=False)
                 if comm_docs:
                     # Comm1, Comm2... の順番で並ぶように group_order で明示
                     feature_word_panel(comm_docs, top_feat_n, "bigram",
@@ -1649,6 +1694,6 @@ elif page == "👤 著者分析":
                 else:
                     new_df["MeSHターム Top10（件数）"] = "（MH列なし）"
 
-                st.dataframe(new_df.head(30), use_container_width=True, hide_index=True)
+                st.dataframe(new_df.head(30), use_container_width=False, hide_index=True)
             else:
                 st.info("新規共著ペアなし。")
