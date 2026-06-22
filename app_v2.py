@@ -404,11 +404,13 @@ def build_bigram_graph(texts: list, top_n: int = 80):
 
 def nx_to_plotly(G, centrality: str = "pagerank", title: str = "",
                  directed: bool = False, show_labels: bool = True,
-                 fullname_map: dict = None, affil_map: dict = None):
+                 fullname_map: dict = None, affil_map: dict = None,
+                 country_map: dict = None):
     if not G.nodes:
         return go.Figure()
     fullname_map = fullname_map or {}
     affil_map = affil_map or {}
+    country_map = country_map or {}
     np.random.seed(42)
     pos = nx.spring_layout(G, seed=42, k=1.2 / math.sqrt(max(len(G.nodes), 1)))
     cent = (nx.pagerank(G, weight="weight") if centrality == "pagerank"
@@ -432,7 +434,9 @@ def nx_to_plotly(G, centrality: str = "pagerank", title: str = "",
     def _hover(n):
         full = fullname_map.get(n, n)
         affil = affil_map.get(n, "（所属情報なし）")
-        return f"<b>{full}</b><br>所属: {affil}"
+        country = country_map.get(n, "")
+        country_str = f"　🌏 {country}" if country and country != "Unknown" else ""
+        return f"<b>{full}</b><br>所属: {affil}{country_str}"
 
     fig = go.Figure([
         go.Scatter(x=edge_x, y=edge_y, mode="lines",
@@ -600,6 +604,77 @@ def extract_top_institution(ad_text: str) -> str:
     if len(fragments) >= 2:
         return fragments[-2]
     return fragments[0]
+
+
+# AD末尾から国名を抽出するためのキーワードリスト
+_COUNTRY_LIST = [
+    "United States", "USA", "U.S.A", "England", "UK", "United Kingdom",
+    "Germany", "France", "Spain", "Italy", "Japan", "China", "Taiwan",
+    "South Korea", "Korea", "Australia", "Canada", "Netherlands", "Switzerland",
+    "India", "Brazil", "Sweden", "Norway", "Denmark", "Finland", "Belgium",
+    "Austria", "Poland", "Portugal", "Israel", "Turkey", "Argentina", "Mexico",
+    "Singapore", "New Zealand", "Ireland", "Greece", "Czech Republic", "Czechia",
+    "Hungary", "Romania", "Serbia", "Chile", "Colombia", "Egypt", "Iran",
+    "Saudi Arabia", "South Africa", "Thailand", "Malaysia", "Indonesia",
+    "Hong Kong", "Scotland", "Wales", "United Arab Emirates", "Russia",
+    "Pakistan", "Bangladesh", "Nepal", "Sri Lanka", "Vietnam", "Philippines",
+    "Iraq", "Jordan", "Lebanon", "Kuwait", "Qatar", "Bahrain", "Oman",
+]
+# 長い名称が短い名称にマッチしないよう長い順に並べる
+_COUNTRY_LIST_SORTED = sorted(_COUNTRY_LIST, key=len, reverse=True)
+
+
+def extract_country(ad_text: str) -> str:
+    """
+    AD（所属）の生テキストから国名を抽出する。
+    セミコロン区切りの最初の所属エントリのみを対象とし、
+    メールアドレスを除去した後、後ろのカンマ区切り断片から順に国名キーワードをマッチする。
+    見つからない場合は "Unknown" を返す。
+    """
+    # メールアドレスを除去してセミコロン区切りの最初のエントリのみを使う
+    ad_clean = re.sub(r"\S+@\S+", "", str(ad_text)).rstrip(".")
+    ad_first = ad_clean.split(";")[0]
+    # 後ろのカンマ区切り断片から順に探す（国名は通常末尾付近にある）
+    frags = [f.strip() for f in ad_first.split(",") if f.strip()]
+    for frag in reversed(frags):
+        for kw in _COUNTRY_LIST_SORTED:
+            if kw.lower() in frag.lower():
+                # 表記を正規化（USA→United States 等）
+                if kw in ("USA", "U.S.A"):
+                    return "United States"
+                if kw in ("UK", "England", "Scotland", "Wales"):
+                    return "United Kingdom"
+                if kw == "South Korea":
+                    return "Korea"
+                return kw
+    return "Unknown"
+
+
+@st.cache_data
+def build_author_country_map(df_src: pd.DataFrame) -> dict:
+    """
+    著者の短縮名 → 国名の対応辞書を作る。
+    複数文献にわたって最も頻出する国名をその著者の所属国とみなす。
+    AD列が存在しない場合は空の辞書を返す。
+    """
+    if "AD" not in df_src.columns:
+        return {}
+    country_counter: dict = {}
+    for _, row in df_src.iterrows():
+        fau = row.get("FAU", [])
+        ad  = row.get("AD", [])
+        if not isinstance(fau, list) or not fau:
+            continue
+        ad_text = ad[0] if isinstance(ad, list) and ad else (ad if isinstance(ad, str) else None)
+        if not ad_text or pd.isna(ad_text):
+            continue
+        country = extract_country(str(ad_text))
+        if country == "Unknown":
+            continue
+        for a in fau:
+            key = shorten_name(a)
+            country_counter.setdefault(key, Counter())[country] += 1
+    return {k: v.most_common(1)[0][0] for k, v in country_counter.items()}
 
 
 @st.cache_data
@@ -971,6 +1046,7 @@ elif page == "📊 Overview":
 
             # ネットワーク分析と同じ所属マップを使い、バーにホバーすると所属が出るようにする
             ov_affil_map = build_author_affiliation_map(df) if "AD" in df.columns else {}
+            ov_country_map = build_author_country_map(df) if "AD" in df.columns else {}
 
             c1, c2, c3 = st.columns(3)
             for col_st, data, xcol, clr, ttl in [
@@ -981,11 +1057,17 @@ elif page == "📊 Overview":
                 with col_st:
                     data = data.copy()
                     data["所属"] = data["Author"].map(lambda a: ov_affil_map.get(a, "（所属情報なし）"))
+                    data["国"] = data["Author"].map(lambda a: ov_country_map.get(a, "―"))
                     fig = px.bar(data, x=xcol, y="Author", orientation="h",
                                  color_discrete_sequence=[clr], title=ttl, height=500,
-                                 custom_data=["所属"])
+                                 custom_data=["所属", "国"])
                     fig.update_traces(
-                        hovertemplate="<b>%{y}</b><br>所属: %{customdata[0]}<br>" + xcol + ": %{x}<extra></extra>"
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "所属: %{customdata[0]}<br>"
+                            "国: %{customdata[1]}<br>"
+                            + xcol + ": %{x}<extra></extra>"
+                        )
                     )
                     fig.update_layout(yaxis=dict(categoryorder="total ascending"))
                     st.plotly_chart(fig, use_container_width=True, key=f"ov_author_{ttl}")
@@ -995,6 +1077,11 @@ elif page == "📊 Overview":
     # ── Tab4: 著者バブル ────────────────────────────────────────
     with tab4:
         if "FAU" in df.columns and "year" in df.columns:
+            st.caption(
+                "**横軸**：発表年　｜　**縦軸**：累積文献数（その著者のその年までの合計論文数）"
+                "　｜　**バブルの大きさ**：その年の新規文献数（大きいほどその年の発表が多い）"
+                "　｜　バブルにマウスを乗せると著者名・当年件数・累積件数を確認できます"
+            )
             rows = [{"year": r["year"], "author": shorten_name(a)}
                     for _, r in df.iterrows() for a in (r.get("FAU") or [])]
             auyr = pd.DataFrame(rows).dropna()
@@ -1330,6 +1417,20 @@ elif page == "👤 著者分析":
                 G_co = build_coauthor_graph(df["FAU"], top_n=top_n_co)
                 fullname_map = build_author_fullname_map(df)
                 affil_map = build_author_affiliation_map(df)
+                country_map = build_author_country_map(df)
+
+            # 国別フィルタ
+            if country_map:
+                all_countries = sorted(set(country_map.values()) - {"Unknown"})
+                selected_country = st.selectbox(
+                    "🌏 国でフィルタ（全著者表示の場合は「すべて」を選択）",
+                    ["すべて"] + all_countries, key="co_country_filter"
+                )
+                if selected_country != "すべて":
+                    keep_nodes = {n for n in G_co.nodes() if country_map.get(n) == selected_country}
+                    G_co = G_co.subgraph(keep_nodes).copy()
+                    if G_co.number_of_nodes() == 0:
+                        st.warning(f"{selected_country} の著者がネットワーク上位{top_n_co}名に含まれていません。")
 
             # ① 全期間ネットワーク
             fig_co = nx_to_plotly(
@@ -1337,8 +1438,93 @@ elif page == "👤 著者分析":
                 title=f"共著ネットワーク（Top{top_n_co}）",
                 directed=False, show_labels=show_lbl,
                 fullname_map=fullname_map, affil_map=affil_map,
+                country_map=country_map,
             )
             st.plotly_chart(fig_co, use_container_width=True, key="co_network_main")
+
+            # ── グラフ特性 ─────────────────────────────────────────
+            st.markdown("#### グラフ特性")
+            degrees = [d for _, d in G_co.degree()]
+            n_nodes = G_co.number_of_nodes()
+            n_edges = G_co.number_of_edges()
+            avg_deg = sum(degrees) / n_nodes if n_nodes else 0
+
+            # スモールワールド指標：平均経路長 L と平均クラスタリング係数 C を計算
+            # ランダムグラフとの比 σ = (C/C_rand) / (L/L_rand) > 1 ならスモールワールド
+            try:
+                largest_cc = max(nx.connected_components(G_co), key=len)
+                G_cc = G_co.subgraph(largest_cc)
+                avg_path = nx.average_shortest_path_length(G_cc)
+                avg_clust = nx.average_clustering(G_co)
+                # ランダムグラフの期待値（Erdos-Renyi近似）
+                p = (2 * n_edges) / (n_nodes * (n_nodes - 1)) if n_nodes > 1 else 0
+                L_rand = math.log(n_nodes) / math.log(avg_deg) if avg_deg > 1 else float("inf")
+                C_rand = p
+                sw_sigma = (avg_clust / C_rand) / (avg_path / L_rand) if C_rand > 0 and L_rand < float("inf") else None
+                is_small_world = sw_sigma is not None and sw_sigma > 1
+            except Exception:
+                avg_path = None; avg_clust = nx.average_clustering(G_co); sw_sigma = None; is_small_world = False
+
+            # スケールフリー判定：次数分布がべき乗則に従うか（最大次数/平均次数の比）
+            max_deg = max(degrees) if degrees else 0
+            deg_ratio = max_deg / avg_deg if avg_deg > 0 else 0
+            is_scale_free = deg_ratio > 5  # ハブノードが平均の5倍以上の次数を持つ場合
+
+            # KPIカード表示
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("ノード数（著者）", n_nodes)
+            g2.metric("エッジ数（共著関係）", n_edges)
+            g3.metric("平均次数", f"{avg_deg:.1f}")
+            g4.metric("平均クラスタリング係数", f"{avg_clust:.3f}")
+
+            # 次数分布グラフ
+            deg_counter = Counter(degrees)
+            deg_df = pd.DataFrame(sorted(deg_counter.items()), columns=["次数", "著者数"])
+            fig_deg = px.bar(
+                deg_df, x="次数", y="著者数",
+                title="次数分布（Degree Distribution）",
+                labels={"次数": "次数（共著者数）", "著者数": "著者数"},
+                color_discrete_sequence=["#19b3a6"],
+            )
+            fig_deg.update_layout(height=280, margin=dict(t=40, b=20))
+            st.plotly_chart(fig_deg, use_container_width=True)
+
+            # グラフ分類の解釈テキスト
+            sw_label = (
+                f"✅ スモールワールドグラフ（σ = {sw_sigma:.2f}）" if is_small_world
+                else (f"σ = {sw_sigma:.2f}（スモールワールド性なし）" if sw_sigma is not None else "計算不可")
+            )
+            sf_label = (
+                f"✅ スケールフリーグラフの特徴あり（最大次数/平均次数 = {deg_ratio:.1f}倍）" if is_scale_free
+                else f"スケールフリーの特徴は弱い（最大次数/平均次数 = {deg_ratio:.1f}倍）"
+            )
+
+            st.markdown(f"""
+**ネットワーク分類**
+- {sw_label}
+- {sf_label}
+""")
+            if avg_path:
+                st.markdown(f"平均経路長: **{avg_path:.2f}**（任意の2著者が平均{avg_path:.1f}ステップで繋がる）")
+
+            with st.expander("📖 次数分布・スケールフリー・スモールワールドの見方", expanded=False):
+                st.markdown("""
+**次数分布とは？**
+各著者が持つ「共著者の人数（次数）」の分布です。横軸が共著者数、縦軸がその人数に該当する著者数です。
+- 分布が右に裾を引く（少数の著者が非常に多くの共著者を持つ）場合はスケールフリー的な特徴です。
+- 逆に山型に近い（著者ごとの共著者数がある範囲に収まる）場合はランダムグラフ的です。
+
+**スケールフリーグラフとは？**
+ごく一部の著者（**ハブ**）が突出して多くの共著者を持ち、残りの著者は少数の共著者しか持たない構造です。
+文献ネットワークがスケールフリーな場合、特定の**キーパーソン（中核的な研究者）が分野全体をつなぐ役割**を果たしていることを示します。
+そのハブ著者が抜けるとネットワークが分断されやすく、影響力の集中も意味します。
+
+**スモールワールドグラフとは？**
+誰もが平均的に少ないステップ数で他の誰かとつながれる（**6次の隔たり**に近い）構造です。
+クラスタリング係数（局所的な集まり）が高く、かつ平均経路長が短い場合に成立します（σ > 1）。
+文献ネットワークがスモールワールドな場合、**情報や研究のトレンドが分野内に素早く伝播しやすい**環境であることを示します。
+異分野の著者同士が少数の仲介者（ブローカー）を通じてつながっていることが多いです。
+""")
 
             # 中心性スコア：pagerank・betweenness 両方をTop10で並列表示
             pr_scores = nx.pagerank(G_co, weight="weight")
@@ -1526,3 +1712,214 @@ elif page == "👤 著者分析":
                 st.dataframe(new_df.head(30), use_container_width=False, hide_index=True)
             else:
                 st.info("新規共著ペアなし。")
+
+            # ─── ⑤ 2部グラフ → Journal間ネットワーク ───────────────────────
+            st.markdown("---")
+            st.markdown("#### 📰 Journal間ネットワーク（2部グラフ射影）")
+            st.caption(
+                "著者（A）× Journal（J）の2部グラフを構築し、Journal側へ射影したネットワークです。"
+                "エッジは「同じ著者が両方のJournalに投稿している」ことを示し、"
+                "エッジの太さ（重み）は共有著者数です。Journal同士の研究コミュニティの重なりを可視化します。"
+            )
+
+            if "TA" in df.columns and "FAU" in df.columns:
+                import networkx.algorithms.bipartite as bip
+
+                B = nx.Graph()
+                jau_df = df.dropna(subset=["TA"])
+                for _, row in jau_df.iterrows():
+                    if not isinstance(row.get("FAU"), list):
+                        continue
+                    j_node = f"J:{row['TA']}"
+                    B.add_node(j_node, bipartite=0)
+                    for a in row["FAU"]:
+                        au_node = f"A:{shorten_name(a)}"
+                        B.add_node(au_node, bipartite=1)
+                        B.add_edge(j_node, au_node)
+
+                journal_nodes = {n for n, d in B.nodes(data=True) if d.get("bipartite") == 0}
+                # 上位Journalのみに絞る
+                top_j_bipartite = df["TA"].value_counts().head(20).index.tolist()
+                top_j_nodes = {f"J:{j}" for j in top_j_bipartite}
+                J_proj = bip.weighted_projected_graph(B, journal_nodes)
+                # Top20に絞ったサブグラフ
+                J_proj_top = J_proj.subgraph([n for n in J_proj.nodes() if n in top_j_nodes]).copy()
+
+                if J_proj_top.number_of_nodes() > 0:
+                    np.random.seed(42)
+                    pos_j = nx.spring_layout(J_proj_top, seed=42, k=2.0 / math.sqrt(max(len(J_proj_top.nodes()), 1)))
+                    edge_weights = [J_proj_top[u][v]["weight"] for u, v in J_proj_top.edges()]
+                    max_w = max(edge_weights) if edge_weights else 1
+                    j_cent = nx.pagerank(J_proj_top, weight="weight")
+                    max_j_cent = max(j_cent.values()) if j_cent else 1
+
+                    jex, jey = [], []
+                    jet = []  # edge hover text
+                    for u, v in J_proj_top.edges():
+                        x0, y0 = pos_j[u]; x1, y1 = pos_j[v]
+                        jex += [x0, x1, None]; jey += [y0, y1, None]
+                        jet += [f"{u.replace('J:','')} ↔ {v.replace('J:','')}: {J_proj_top[u][v]['weight']}名の著者を共有", None, None]
+
+                    fig_jnet = go.Figure([
+                        go.Scatter(
+                            x=jex, y=jey, mode="lines",
+                            line=dict(width=1.5, color="#b0c4de"),
+                            hoverinfo="none", showlegend=False,
+                        ),
+                        go.Scatter(
+                            x=[pos_j[n][0] for n in J_proj_top.nodes()],
+                            y=[pos_j[n][1] for n in J_proj_top.nodes()],
+                            mode="markers+text",
+                            text=[n.replace("J:", "") for n in J_proj_top.nodes()],
+                            textposition="top center",
+                            textfont=dict(size=9),
+                            marker=dict(
+                                size=[max(10, j_cent.get(n, 0) / max_j_cent * 50) for n in J_proj_top.nodes()],
+                                color="#19b3a6",
+                                line=dict(width=1, color="white"),
+                            ),
+                            hovertext=[
+                                f"<b>{n.replace('J:','')}</b><br>"
+                                f"文献数: {df[df['TA']==n.replace('J:','')].shape[0]}"
+                                for n in J_proj_top.nodes()
+                            ],
+                            hoverinfo="text", showlegend=False,
+                        ),
+                    ])
+                    fig_jnet.update_layout(
+                        title="Journal間ネットワーク（Top20誌・共有著者数による重み付き）",
+                        title_x=0.5, height=550,
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        paper_bgcolor="white", plot_bgcolor="white",
+                        margin=dict(l=20, r=20, t=50, b=20),
+                    )
+                    st.plotly_chart(fig_jnet, use_container_width=True, key="journal_bipartite_net")
+
+                    # 共有著者数Top10ペア
+                    top_j_edges = sorted(
+                        [(u.replace("J:", ""), v.replace("J:", ""), d["weight"])
+                         for u, v, d in J_proj_top.edges(data=True)],
+                        key=lambda x: x[2], reverse=True
+                    )[:10]
+                    if top_j_edges:
+                        st.caption("共有著者数 Top10 Journalペア")
+                        st.dataframe(
+                            pd.DataFrame(top_j_edges, columns=["Journal A", "Journal B", "共有著者数"]),
+                            use_container_width=False, hide_index=True,
+                        )
+                else:
+                    st.info("Journal間ネットワークを構築できませんでした。")
+            else:
+                st.info("TA（Journal名）列またはFAU列が見つかりません。")
+
+            # ─── ⑥ 有向グラフ → Last Author影響力ネットワーク ──────────────
+            st.markdown("---")
+            st.markdown("#### 🎯 PI影響力ネットワーク（Last Author → Other Author 有向グラフ）")
+            st.caption(
+                "Last Author（最終著者）から Other Author（中間・筆頭著者）への有向エッジを張ったネットワークです。"
+                "学術慣行上、Last AuthorはPI（Principal Investigator：研究主宰者）であることが多く、"
+                "PageRankスコアが高いほど「多くの研究者を指導・影響下に置いているPI」を示します。"
+                "矢印の向き：Last Author → 共著者（その研究を指導・支援した方向）"
+            )
+
+            if "FAU" in df.columns:
+                DG = nx.DiGraph()
+                for _, row in df.iterrows():
+                    fau = row.get("FAU", [])
+                    if not isinstance(fau, list) or len(fau) < 2:
+                        continue
+                    last = shorten_name(fau[-1])
+                    for other in fau[:-1]:
+                        other_s = shorten_name(other)
+                        if DG.has_edge(last, other_s):
+                            DG[last][other_s]["weight"] += 1
+                        else:
+                            DG.add_edge(last, other_s, weight=1)
+
+                # 上位ノードに絞る
+                pi_top_n = 60
+                flat_all = [shorten_name(a) for authors in df["FAU"] if isinstance(authors, list) for a in authors]
+                top_authors_set = {a for a, _ in Counter(flat_all).most_common(pi_top_n)}
+                DG_top = DG.subgraph([n for n in DG.nodes() if n in top_authors_set]).copy()
+
+                if DG_top.number_of_nodes() > 0:
+                    pr_d = nx.pagerank(DG_top, weight="weight")
+                    max_pr_d = max(pr_d.values()) if pr_d else 1
+
+                    np.random.seed(42)
+                    pos_d = nx.spring_layout(DG_top, seed=42, k=1.5 / math.sqrt(max(len(DG_top.nodes()), 1)))
+
+                    # エッジ（有向）
+                    de_x, de_y = [], []
+                    for u, v in DG_top.edges():
+                        x0, y0 = pos_d[u]; x1, y1 = pos_d[v]
+                        de_x += [x0, x1, None]; de_y += [y0, y1, None]
+
+                    # ノード色：Last Author登場回数でグラデーション
+                    last_au_counter = Counter()
+                    for authors in df["FAU"]:
+                        if isinstance(authors, list) and authors:
+                            last_au_counter[shorten_name(authors[-1])] += 1
+
+                    fig_dir = go.Figure([
+                        go.Scatter(
+                            x=de_x, y=de_y, mode="lines",
+                            line=dict(width=0.5, color="#e8c89a"),
+                            hoverinfo="none", showlegend=False,
+                        ),
+                        go.Scatter(
+                            x=[pos_d[n][0] for n in DG_top.nodes()],
+                            y=[pos_d[n][1] for n in DG_top.nodes()],
+                            mode="markers+text" if show_lbl else "markers",
+                            text=list(DG_top.nodes()) if show_lbl else [],
+                            textposition="top center",
+                            textfont=dict(size=8),
+                            marker=dict(
+                                size=[max(8, pr_d.get(n, 0) / max_pr_d * 45) for n in DG_top.nodes()],
+                                color=[last_au_counter.get(n, 0) for n in DG_top.nodes()],
+                                colorscale="YlOrRd",
+                                showscale=True,
+                                colorbar=dict(title="Last Author<br>文献数", thickness=12),
+                                line=dict(width=1, color="white"),
+                            ),
+                            hovertext=[
+                                f"<b>{fullname_map.get(n, n)}</b><br>"
+                                f"所属: {affil_map.get(n, '―')}<br>"
+                                f"国: {country_map.get(n, '―')}<br>"
+                                f"PI影響力(PageRank): {pr_d.get(n, 0):.4f}<br>"
+                                f"Last Author文献数: {last_au_counter.get(n, 0)}件"
+                                for n in DG_top.nodes()
+                            ],
+                            hoverinfo="text", showlegend=False,
+                        ),
+                    ])
+                    fig_dir.update_layout(
+                        title=f"PI影響力ネットワーク（Top{pi_top_n}著者・有向グラフ）<br>"
+                              "<sup>円のサイズ＝PageRankスコア（影響力の大きさ）　色＝Last Author文献数（赤いほど多い）</sup>",
+                        title_x=0.5, height=600,
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        paper_bgcolor="white", plot_bgcolor="white",
+                        margin=dict(l=20, r=20, t=70, b=20),
+                    )
+                    st.plotly_chart(fig_dir, use_container_width=True, key="pi_influence_network")
+
+                    # PageRank Top10
+                    top_pi = sorted(pr_d.items(), key=lambda x: x[1], reverse=True)[:10]
+                    st.caption("PI影響力 PageRank Top10")
+                    pi_df = pd.DataFrame([
+                        {
+                            "著者": a,
+                            "所属": affil_map.get(a, "―"),
+                            "国": country_map.get(a, "―"),
+                            "PageRank": round(s, 5),
+                            "Last Author文献数": last_au_counter.get(a, 0),
+                        }
+                        for a, s in top_pi
+                    ])
+                    st.dataframe(pi_df, use_container_width=False, hide_index=True)
+                else:
+                    st.info("有向グラフを構築できませんでした。")
+            else:
+                st.info("FAU列が見つかりません。")
