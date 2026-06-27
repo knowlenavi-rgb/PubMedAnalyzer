@@ -303,37 +303,95 @@ def tfidf_top(group_texts: dict, top_n: int, mode: str = "bigram") -> pd.DataFra
 
 
 
+def kwic_extract_single(doc_text: str, term_words: list, window: int = 7) -> str:
+    """
+    1つの文書から指定フレーズの最初の出現コンテキストを
+    「...前文脈 [フレーズ] 後文脈...」の文字列で返す。ホバー表示用。
+    """
+    raw = re.findall(r"[A-Za-z][A-Za-z\-]*|[.,;:]", doc_text)
+    lower = [w.lower() for w in raw]
+    n = len(term_words)
+    for i in range(len(lower) - n + 1):
+        if lower[i:i + n] == term_words:
+            start = max(0, i - window)
+            end   = min(len(raw), i + n + window)
+            before  = " ".join(raw[start:i])
+            matched = " ".join(raw[i:i + n])
+            after   = " ".join(raw[i + n:end])
+            return f"…{before} <b>{matched}</b> {after}…"
+    return ""
+
+
+def build_kwic_map(group_docs: dict, top_n: int, max_hits: int = 2) -> dict:
+    """
+    各グループの上位bigramについて、実際の文献から文脈（KWIC）を事前抽出する。
+    Returns: {group: {term: [context_str, ...]}}
+    """
+    kwic_map = {}
+    for g, docs in group_docs.items():
+        all_text = " ".join(docs)
+        bigrams  = Counter(make_bigrams(all_text))
+        top_terms = [t.replace("_", " ") for t, _ in bigrams.most_common(top_n * 2)]
+        kwic_map[g] = {}
+        for term_display in top_terms[:top_n]:
+            term_words = term_display.lower().split()
+            hits = []
+            for doc in docs:
+                if not isinstance(doc, str): continue
+                ctx = kwic_extract_single(doc, term_words)
+                if ctx:
+                    hits.append(ctx)
+                if len(hits) >= max_hits:
+                    break
+            kwic_map[g][term_display] = hits
+    return kwic_map
+
+
 def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int = None,
-                 group_order: list = None):
+                 group_order: list = None, kwic_map: dict = None):
     result = tfidf_top(group_texts, top_n, mode)
     if result.empty:
         st.info("データが不足しています。")
         return
     result = result.sort_values("tfidf", ascending=True)
     n_groups = result["group"].nunique()
-    # wrap未指定時：3列を上限に横並びし、4グループ以上は3列で折り返す（視認性重視）
     facet_wrap = wrap if wrap is not None else min(n_groups, 3)
     n_rows = math.ceil(n_groups / facet_wrap)
     max_rows_per_group = result.groupby("group").size().max()
-    row_h = 22  # 1行あたりの高さ（以前のMeSH特徴語と同等のサイズ感）
+    row_h = 22
     category_orders = {}
     if group_order:
-        # 実際に存在するグループのみ・指定順を維持
         present = set(result["group"].unique())
         ordered = [g for g in group_order if g in present]
-        # Plotly Express の既知の仕様: facet_col_wrap 使用時は行の積み上がる順序が
-        # 反転する（最初に並べた行が一番下に描画される）。見た目の上から下に
-        # 指定順（例: Top Journal の文献数が多い順）で並ぶよう、列数ぶんのチャンクに
-        # 分割してチャンクの順序を反転させてから渡す。
         chunks = [ordered[i:i + facet_wrap] for i in range(0, len(ordered), facet_wrap)]
         category_orders["group"] = [g for chunk in reversed(chunks) for g in chunk]
-    fig = px.bar(
-        result, x="tfidf", y="term", color="group",
-        facet_col="group", facet_col_wrap=facet_wrap, orientation="h",
-        labels={"tfidf": "TF-IDF", "term": ""}, title=title,
-        height=max(400, max_rows_per_group * row_h * n_rows + n_rows * 40),
-        category_orders=category_orders or None,
-    )
+
+    # KWIC が渡されている場合はホバーテキストに文脈を追加する
+    if kwic_map and mode == "bigram":
+        def _kwic_hover(row):
+            hits = (kwic_map.get(row["group"], {}).get(row["term"], []))
+            ctx  = "<br>".join(hits[:2]) if hits else "（文脈例なし）"
+            return f"<b>{row['term']}</b><br>TF-IDF: {row['tfidf']:.4f}<br><br>📖 文脈:<br>{ctx}"
+        result = result.copy()
+        result["kwic_hover"] = result.apply(_kwic_hover, axis=1)
+        fig = px.bar(
+            result, x="tfidf", y="term", color="group",
+            facet_col="group", facet_col_wrap=facet_wrap, orientation="h",
+            labels={"tfidf": "TF-IDF", "term": ""}, title=title,
+            height=max(400, max_rows_per_group * row_h * n_rows + n_rows * 40),
+            category_orders=category_orders or None,
+            custom_data=["kwic_hover"],
+        )
+        fig.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
+    else:
+        fig = px.bar(
+            result, x="tfidf", y="term", color="group",
+            facet_col="group", facet_col_wrap=facet_wrap, orientation="h",
+            labels={"tfidf": "TF-IDF", "term": ""}, title=title,
+            height=max(400, max_rows_per_group * row_h * n_rows + n_rows * 40),
+            category_orders=category_orders or None,
+        )
+
     fig.update_yaxes(
         matches=None, showticklabels=True,
         categoryorder="total ascending",
@@ -345,7 +403,6 @@ def tfidf_chart(group_texts: dict, top_n: int, mode: str, title: str, wrap: int 
         title_font=dict(size=14),
         margin=dict(t=60, b=20),
     )
-    # facetタイトルのプレフィックス除去 & フォント拡大
     fig.for_each_annotation(lambda a: a.update(
         text=a.text.split("=")[-1],
         font=dict(size=13, color="#2c3e50"),
@@ -358,16 +415,13 @@ def feature_word_panel(group_docs: dict, top_n: int, mode: str, title: str,
                         title_lookup: dict = None):
     """
     特徴語のTF-IDFグラフを表示する。
-    group_docs はグループ名 -> 生テキストのリスト。
-    （以前は「推移＋乖離」「文脈(KWIC)」タブも含んでいたが、tf-idf計算式を
-     R/tidytext互換に修正したことでグループ間の違いがTF-IDFだけで明確に出る
-     ようになったため、シンプルにTF-IDF表示のみとした。
-     key_prefix・title_lookup は当時KWICタブ用に使っていた名残で、
-     現在は未使用だが呼び出し側の互換性のため引数として残してある）
+    bigram モードのときは KWIC 文脈をホバーに埋め込む。
     """
     group_texts_joined = {g: " ".join(docs) for g, docs in group_docs.items()}
-    tfidf_chart(group_texts_joined, top_n, mode, title, wrap=wrap, group_order=group_order)
-
+    # bigram モードのみ KWIC 事前抽出（他モードは不要）
+    kwic_data = build_kwic_map(group_docs, top_n) if mode == "bigram" else None
+    tfidf_chart(group_texts_joined, top_n, mode, title,
+                wrap=wrap, group_order=group_order, kwic_map=kwic_data)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -563,47 +617,46 @@ def get_community_texts(community_nodes, df_src):
             texts.append(str(row["AB"]))
     return texts
 
-# 所属（AD）から最上位の組織名を抽出するためのキーワード
-# 優先度1: 大学・病院・研究所本体など、最上位の組織を示すキーワード
-_INST_TOP_KEYWORDS = [
-    "University", "Univ\\.", "College", "Hospital", "Institute", "Institut[e]?",
-    "Academy", "Foundation",
-    "Universität", "Klinikum", "Charité",
-    "Université", "Hôpital", "Hôpitaux", "CHU",
-    "Universidad", "Universitat", "Instituto",
-    "Università", "Ospedale",
-    "Universitet", "Universiteit",
+# ── 機関名抽出：スコアリング方式（改良版） ──────────────────────
+# 旧版は「最初にキーワードにマッチした断片」を返していたため
+# "Brain Research Institute, Niigata University" のような文字列で
+# 下位機関（研究所）が大学より先にマッチして誤抽出していた。
+# 改良版では各断片に優先度スコアを付け、最も上位の機関種別を選ぶ。
+_INST_PRIORITY = [
+    (10, ["University", "Universität", "Université", "Universidad",
+          "Universitat", "Università", "Universiteit", "Universitet"]),
+    (8,  ["Hospital", "Hôpital", "Hôpitaux", "Krankenhaus", "Ospedale"]),
+    (6,  ["Research Institute", "Klinikum", "Charité", "CHU",
+          "Academy", "Foundation"]),
+    (4,  ["Graduate School", "School of Medicine", "Medical School",
+          "College of Medicine"]),
+    (2,  ["Center", "Centre", "Clinic", "Clinique", "Laboratory", "Department"]),
 ]
-# 優先度2: 学部・センターなど下位区分（優先度1で見つからない場合のフォールバック）
-_INST_SUB_KEYWORDS = ["School of Medicine", "Medical School", "Clinic", "Clinique",
-                       "Center", "Centre", "Laboratory"]
-_INST_TOP_PATTERN = re.compile(r"(" + "|".join(_INST_TOP_KEYWORDS) + r")", re.IGNORECASE)
-_INST_SUB_PATTERN = re.compile(r"(" + "|".join(_INST_SUB_KEYWORDS) + r")", re.IGNORECASE)
+
+def _inst_score(frag: str) -> int:
+    for score, keywords in _INST_PRIORITY:
+        for kw in keywords:
+            if kw.lower() in frag.lower():
+                return score
+    return 0
 
 
 def extract_top_institution(ad_text: str) -> str:
     """
-    AD（所属）の生テキストから最上位の組織名（大学・病院・研究所など）を抽出する。
-    "Department of Neurology, Tokyo University, Tokyo, Japan" のような文字列から
-    "Tokyo University" のような最上位機関名のみを取り出すことを狙う。
-
-    優先順位:
-      1. 大学・病院・研究所などのキーワードを含む最初の断片
-      2. 学部・センターなどのキーワードを含む最初の断片
-      3. どちらもなければ、末尾から2番目の断片（都市名の前は機関名であることが多い）
+    AD（所属）の生テキストから最上位の組織名（大学・病院など）を抽出する。
+    カンマ区切りの各断片にスコアを付け（大学=10 > 病院=8 > 研究所=6 ...）、
+    最高スコアの断片を返す。同スコアの場合は文章中の出現順（早い方）を優先。
     """
-    fragments = [f.strip().rstrip(".") for f in re.split(r"[;,]", str(ad_text)) if f.strip()]
+    ad_clean = re.sub(r"\S+@\S+", "", str(ad_text)).rstrip(".")
+    ad_first = ad_clean.split(";")[0]
+    fragments = [f.strip().rstrip(".") for f in ad_first.split(",") if f.strip()]
     if not fragments:
         return "―"
-    for frag in fragments:
-        if _INST_TOP_PATTERN.search(frag):
-            return frag
-    for frag in fragments:
-        if _INST_SUB_PATTERN.search(frag):
-            return frag
-    if len(fragments) >= 2:
-        return fragments[-2]
-    return fragments[0]
+    scored = [(_inst_score(f), i, f) for i, f in enumerate(fragments)]
+    best = sorted(scored, key=lambda x: (-x[0], x[1]))[0]
+    if best[0] == 0:
+        return fragments[-2] if len(fragments) >= 2 else fragments[0]
+    return best[2]
 
 
 # AD末尾から国名を抽出するためのキーワードリスト
@@ -654,8 +707,7 @@ def extract_country(ad_text: str) -> str:
 def build_author_country_map(df_src: pd.DataFrame) -> dict:
     """
     著者の短縮名 → 国名の対応辞書を作る。
-    複数文献にわたって最も頻出する国名をその著者の所属国とみなす。
-    AD列が存在しない場合は空の辞書を返す。
+    AD帰属ルールは build_author_affiliation_map と同じ（1対1 / 第一著者のみ）。
     """
     if "AD" not in df_src.columns:
         return {}
@@ -665,13 +717,19 @@ def build_author_country_map(df_src: pd.DataFrame) -> dict:
         ad  = row.get("AD", [])
         if not isinstance(fau, list) or not fau:
             continue
-        ad_text = ad[0] if isinstance(ad, list) and ad else (ad if isinstance(ad, str) else None)
-        if not ad_text or pd.isna(ad_text):
-            continue
-        country = extract_country(str(ad_text))
-        if country == "Unknown":
-            continue
-        for a in fau:
+        if not isinstance(ad, list):
+            ad = [ad] if (ad and pd.notna(ad)) else []
+        n_fau, n_ad = len(fau), len(ad)
+        for i, a in enumerate(fau):
+            if n_ad == n_fau and i < n_ad:
+                ad_text = str(ad[i])
+            elif n_ad == 1 and i == 0:
+                ad_text = str(ad[0])
+            else:
+                continue
+            country = extract_country(ad_text)
+            if country == "Unknown":
+                continue
             key = shorten_name(a)
             country_counter.setdefault(key, Counter())[country] += 1
     return {k: v.most_common(1)[0][0] for k, v in country_counter.items()}
@@ -681,9 +739,10 @@ def build_author_country_map(df_src: pd.DataFrame) -> dict:
 def build_author_affiliation_map(df_src: pd.DataFrame) -> dict:
     """
     著者の短縮名 → 最上位組織名（大学・病院など）の対応辞書を作る。
-    PubMed/MEDLINE形式では AD は文献単位の情報のため、
-    各著者が関わった文献から抽出した組織名のうち最も頻出するものをその著者の所属とみなす。
-    AD列が存在しない場合は空の辞書を返す。
+    AD帰属ルール:
+      FAU数=AD数 → i番目の著者にi番目のADを1対1で付与
+      AD=1件のみ → 第一著者(FAU[0])にのみ付与、他著者はスキップ
+      AD=0件    → 誰にも付与しない
     """
     if "AD" not in df_src.columns:
         return {}
@@ -693,16 +752,19 @@ def build_author_affiliation_map(df_src: pd.DataFrame) -> dict:
         ad  = row.get("AD", [])
         if not isinstance(fau, list) or not fau:
             continue
-        if isinstance(ad, list):
-            ad_text = ad[0] if ad else None
-        else:
-            ad_text = ad
-        if not ad_text or pd.isna(ad_text):
-            continue
-        top_inst = extract_top_institution(str(ad_text))
-        if not top_inst or top_inst == "―":
-            continue
-        for a in fau:
+        if not isinstance(ad, list):
+            ad = [ad] if (ad and pd.notna(ad)) else []
+        n_fau, n_ad = len(fau), len(ad)
+        for i, a in enumerate(fau):
+            if n_ad == n_fau and i < n_ad:
+                ad_text = str(ad[i])
+            elif n_ad == 1 and i == 0:
+                ad_text = str(ad[0])
+            else:
+                continue
+            top_inst = extract_top_institution(ad_text)
+            if not top_inst or top_inst == "―":
+                continue
             key = shorten_name(a)
             affil_counter.setdefault(key, Counter())[top_inst] += 1
     return {k: v.most_common(1)[0][0] for k, v in affil_counter.items()}
@@ -762,16 +824,23 @@ def build_mesh_pivot(df: pd.DataFrame, top_n: int, min_year: int):
     return pivot_norm, mdf
 
 def detect_bursts(mdf: pd.DataFrame, top_n: int, min_year: int, z_th: float):
+    """
+    改良版バースト検知:
+    - 対象MeSHをtop_n件（旧: top_n件のうち5件未満を除外）
+    - Zスコアが連続してz_th以上の年をひとまとめに「バースト期間」として記録
+    - 連続バースト年数も出力（示唆の深さの指標）
+    """
     y_max = int(mdf["year"].max())
-    burst_mesh = mdf["mesh"].value_counts().head(top_n).index.tolist()
+    # min_total=5 以上の出現がある語のみ対象
+    burst_mesh = (mdf["mesh"].value_counts()
+                  .loc[lambda s: s >= 5]
+                  .head(top_n).index.tolist())
     results = []
     for term in burst_mesh:
         series = (mdf[mdf["mesh"] == term].groupby("year").size()
                   .reindex(range(min_year, y_max + 1), fill_value=0))
-        if series.sum() < 5:
-            continue
         mean, std = series.mean(), series.std()
-        if std == 0:
+        if std == 0 or len(series) < 4:
             continue
         z = (series - mean) / std
         in_b, b_start = False, None
@@ -780,22 +849,24 @@ def detect_bursts(mdf: pd.DataFrame, top_n: int, min_year: int, z_th: float):
                 in_b, b_start = True, yr_val
             elif zv < z_th and in_b:
                 slice_s = series[b_start:yr_val].dropna()
-                if slice_s.empty:
-                    in_b = False
-                    continue
-                results.append({
-                    "MeSH": term, "バースト開始": b_start, "バースト終了": yr_val - 1,
-                    "期間": yr_val - b_start,
-                    "ピーク件数": int(slice_s.max()),
-                    "ピーク年": int(slice_s.idxmax()),
-                    "最大Zスコア": round(float(z[b_start:yr_val].dropna().max()), 2),
-                })
+                if not slice_s.empty:
+                    results.append({
+                        "MeSH": term,
+                        "バースト開始": b_start,
+                        "バースト終了": yr_val - 1,
+                        "期間": yr_val - b_start,
+                        "ピーク件数": int(slice_s.max()),
+                        "ピーク年": int(slice_s.idxmax()),
+                        "最大Zスコア": round(float(z[b_start:yr_val].dropna().max()), 2),
+                    })
                 in_b = False
         if in_b:
             slice_s = series[b_start:].dropna()
             if not slice_s.empty:
                 results.append({
-                    "MeSH": term, "バースト開始": b_start, "バースト終了": y_max,
+                    "MeSH": term,
+                    "バースト開始": b_start,
+                    "バースト終了": y_max,
                     "期間": y_max - b_start + 1,
                     "ピーク件数": int(slice_s.max()),
                     "ピーク年": int(slice_s.idxmax()),
@@ -926,9 +997,51 @@ PAGES = [
 ]
 page = st.sidebar.radio("ページ選択", PAGES)
 st.sidebar.markdown("---")
-st.sidebar.caption("文献Analyzer v2.3（デモ版）")
 
-df = st.session_state.df
+# ── 全ページ共通：国フィルタ ─────────────────────────────────
+# ページ選択の直下に配置し、選択した国の著者が関与する文献のみ分析対象にする
+_base_df = st.session_state.df
+
+if _base_df is not None and "AD" in _base_df.columns:
+    with st.sidebar.expander("🌏 国フィルタ（全ページ共通）", expanded=False):
+        @st.cache_data
+        def _get_doc_countries(df_src: pd.DataFrame) -> list:
+            """各文献の第一著者の国を返す（フィルタ用）"""
+            countries = set()
+            for _, row in df_src.iterrows():
+                ad = row.get("AD", [])
+                if not isinstance(ad, list): ad = [ad] if ad else []
+                if ad:
+                    c = extract_country(str(ad[0]))
+                    if c != "Unknown":
+                        countries.add(c)
+            return sorted(countries)
+
+        available_countries = _get_doc_countries(_base_df)
+        selected_country_filter = st.selectbox(
+            "第一著者の国で絞り込み",
+            ["すべて"] + available_countries,
+            key="global_country_filter",
+        )
+        if selected_country_filter != "すべて":
+            st.caption(f"対象: {selected_country_filter} の著者が筆頭の文献のみ")
+
+    # フィルタ適用
+    if selected_country_filter != "すべて":
+        def _first_author_country_match(row, target):
+            ad = row.get("AD", [])
+            if not isinstance(ad, list): ad = [ad] if ad else []
+            return ad and extract_country(str(ad[0])) == target
+        mask = _base_df.apply(_first_author_country_match,
+                               axis=1, target=selected_country_filter)
+        df = _base_df[mask].copy()
+    else:
+        df = _base_df
+else:
+    selected_country_filter = "すべて"
+    df = _base_df
+
+st.sidebar.caption("文献Analyzer v2.3（デモ版）")
 
 # ═══════════════════════════════════════════════════════════════
 # HOME
@@ -993,8 +1106,8 @@ elif page == "📊 Overview":
         TOP_AU = st.slider("表示著者数（Top Authors）", 10, 30, 20, key="ov_top_au")
         TOP_BB = st.slider("表示著者数（著者推移）", 10, 30, 20, key="ov_bb_n")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["📈 文献数推移", "📰 Top Journals", "👥 Top Authors", "🫧 著者推移"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["📈 文献数推移", "📰 Top Journals", "👥 Top Authors", "🫧 著者推移", "🌏 国別推移"]
     )
 
     # ── Tab1: 文献数推移 ─────────────────────────────────────────
@@ -1103,6 +1216,44 @@ elif page == "📊 Overview":
                               yaxis_title="累積文献数（件）", xaxis_title="Year")
             st.plotly_chart(fig, use_container_width=True)
 
+    # ── Tab5: 国別文献推移 ───────────────────────────────────────
+    with tab5:
+        if "year" not in df.columns or "AD" not in df.columns:
+            st.info("year 列または AD（所属）列が見つかりません。")
+        else:
+            st.caption("第一著者の所属国を基準に年別・国別の文献数を積み上げグラフで表示します。")
+            _cy_rows = []
+            for _, _row in df.dropna(subset=["year"]).iterrows():
+                _ad = _row.get("AD", [])
+                if not isinstance(_ad, list): _ad = [_ad] if _ad else []
+                _c = extract_country(str(_ad[0])) if _ad else "Unknown"
+                _cy_rows.append({"year": int(_row["year"]), "country": _c})
+            cy_df = pd.DataFrame(_cy_rows)
+            TOP_CTRY = 8
+            top_ctry = cy_df[cy_df["country"] != "Unknown"]["country"].value_counts().head(TOP_CTRY).index.tolist()
+            cy_df["country_grp"] = cy_df["country"].where(cy_df["country"].isin(top_ctry), other="Others")
+            cy_trend = cy_df.groupby(["year", "country_grp"]).size().reset_index(name="count")
+            ctry_order = top_ctry + ["Others"]
+            cy_trend["country_grp"] = pd.Categorical(cy_trend["country_grp"], categories=ctry_order, ordered=True)
+            cy_trend = cy_trend.sort_values(["year", "country_grp"])
+            palette_c = px.colors.qualitative.Plotly
+            cmap_c = {c: palette_c[i % len(palette_c)] for i, c in enumerate(top_ctry)}
+            cmap_c["Others"] = "#cccccc"
+            fig_ctry = px.bar(
+                cy_trend, x="year", y="count", color="country_grp",
+                barmode="stack",
+                color_discrete_map=cmap_c,
+                category_orders={"country_grp": ctry_order},
+                labels={"count": "文献数", "year": "Year", "country_grp": "国"},
+                title=f"国別 文献数推移（Top{TOP_CTRY}国 + Others）",
+                height=460,
+            )
+            fig_ctry.update_layout(
+                bargap=0.1,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
+            )
+            st.plotly_chart(fig_ctry, use_container_width=True)
+
 
 # ═══════════════════════════════════════════════════════════════
 # Journal分析
@@ -1119,6 +1270,11 @@ elif page == "📰 Journal分析":
         top_w   = st.slider("表示フレーズ数（bigram特徴語）", 5, 20, 10, key="jnl_j_w")
         top_j_m = st.slider("対象Journal数（MeSH特徴語）", 3, 10, 6, key="jnl_mesh_n")
         top_m_w = st.slider("表示MeSH数（MeSH特徴語）", 5, 20, 10, key="jnl_mesh_w")
+        st.markdown("---")
+        jnl_recent_yr = st.slider(
+            "比較期間（直近N年）", 1, 15, 5, key="jnl_recent_yr",
+            help="全期間のTop Journalと、直近N年のTop Journalを比較します"
+        )
 
     tab1, tab2, tab3 = st.tabs(["📊 Journal推移", "🔤 bigram特徴語", "🧬 MeSH特徴語"])
 
@@ -1155,6 +1311,66 @@ elif page == "📰 Journal分析":
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
             )
             st.plotly_chart(fig_stack, use_container_width=True, key="jnl_trend_chart")
+
+            # ── 全期間 vs 直近N年 の比較 ──────────────────────────
+            st.markdown("---")
+            ym_jnl = int(jdf2["year"].max())
+            y_recent_jnl = ym_jnl - jnl_recent_yr + 1
+            df_recent_jnl = jdf2[jdf2["year"] >= y_recent_jnl]
+
+            all_top10  = jdf2["TA"].value_counts().head(10).reset_index()
+            rec_top10  = df_recent_jnl["TA"].value_counts().head(10).reset_index()
+            all_top10.columns = ["Journal", "全期間文献数"]
+            rec_top10.columns  = ["Journal", f"直近{jnl_recent_yr}年文献数"]
+
+            st.caption(
+                f"**全期間 Top10** vs **直近{jnl_recent_yr}年（{y_recent_jnl}〜{ym_jnl}）Top10** の比較"
+                f"（直近文献数: {len(df_recent_jnl):,}件 / 全体: {len(jdf2):,}件）"
+            )
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig_all = px.bar(
+                    all_top10[::-1], x="全期間文献数", y="Journal", orientation="h",
+                    title="全期間 Top10", color_discrete_sequence=["#19b3a6"],
+                    height=360, labels={"全期間文献数": "文献数"},
+                )
+                fig_all.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+                st.plotly_chart(fig_all, use_container_width=True, key="jnl_all_top10")
+            with col_b:
+                fig_rec = px.bar(
+                    rec_top10[::-1], x=f"直近{jnl_recent_yr}年文献数", y="Journal",
+                    orientation="h",
+                    title=f"直近{jnl_recent_yr}年 Top10", color_discrete_sequence=["#e74c3c"],
+                    height=360, labels={f"直近{jnl_recent_yr}年文献数": "文献数"},
+                )
+                fig_rec.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+                st.plotly_chart(fig_rec, use_container_width=True, key="jnl_rec_top10")
+
+            # ── 直近N年の積み上げ棒グラフ ──────────────────────────
+            st.markdown(f"**直近{jnl_recent_yr}年（{y_recent_jnl}〜{ym_jnl}）のJournal推移**")
+            rec_top_list = df_recent_jnl["TA"].value_counts().head(TOP_STACK).index.tolist()
+            df_recent_jnl = df_recent_jnl.copy()
+            df_recent_jnl["TA_grp"] = df_recent_jnl["TA"].where(
+                df_recent_jnl["TA"].isin(rec_top_list), other="Others"
+            )
+            rec_trend = df_recent_jnl.groupby(["year", "TA_grp"]).size().reset_index(name="count")
+            rec_order = rec_top_list + ["Others"]
+            rec_trend["TA_grp"] = pd.Categorical(rec_trend["TA_grp"], categories=rec_order, ordered=True)
+            rec_color_map = {j: palette[i % len(palette)] for i, j in enumerate(rec_top_list)}
+            rec_color_map["Others"] = "#cccccc"
+            fig_rec_stack = px.bar(
+                rec_trend, x="year", y="count", color="TA_grp",
+                barmode="stack", color_discrete_map=rec_color_map,
+                category_orders={"TA_grp": rec_order},
+                labels={"count": "文献数", "year": "Year", "TA_grp": "Journal"},
+                title=f"直近{jnl_recent_yr}年 Top{TOP_STACK} Journal + Others 年別推移",
+                height=400,
+            )
+            fig_rec_stack.update_layout(
+                bargap=0.1,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left"),
+            )
+            st.plotly_chart(fig_rec_stack, use_container_width=True, key="jnl_recent_stack")
 
     # ── Tab2: Journal別 bigram特徴語 ────────────────────────────
     with tab2:
@@ -1257,6 +1473,53 @@ elif page == "🔥 ホットキーワード":
                     height=max(500, top_mesh_n * 16),
                     margin=dict(l=300, r=60, t=60, b=60),
                 )
+
+                # ── バーストハイライト：バースト検知結果をヒートマップに重ねる ──
+                # ヒートマップ描画後にバーストを計算してscatterで★を打つ
+                burst_df_hl = detect_bursts(mdf_all, burst_top_n, min_year_m, burst_z_th) \
+                              if not pivot_norm.empty else pd.DataFrame()
+                y_terms = pivot_norm.columns.tolist()   # ヒートマップのy軸ラベル（MeSH一覧）
+                x_years = [str(y) for y in pivot_norm.index]  # x軸ラベル（年文字列）
+
+                if not burst_df_hl.empty:
+                    # ヒートマップに載っているMeSHかつ年がx軸範囲内のもののみ
+                    hl_x, hl_y, hl_text = [], [], []
+                    for _, brow in burst_df_hl.iterrows():
+                        mesh = brow["MeSH"]
+                        peak_str = str(brow["ピーク年"])
+                        if mesh in y_terms and peak_str in x_years:
+                            hl_x.append(peak_str)
+                            hl_y.append(mesh)
+                            hl_text.append(
+                                f"<b>🔥 {mesh}</b><br>"
+                                f"バースト: {brow['バースト開始']}〜{brow['バースト終了']}年<br>"
+                                f"ピーク: {brow['ピーク年']}年 / {brow['ピーク件数']}件<br>"
+                                f"最大Zスコア: {brow['最大Zスコア']}"
+                            )
+                    if hl_x:
+                        fig_heat.add_trace(go.Scatter(
+                            x=hl_x, y=hl_y,
+                            mode="markers",
+                            marker=dict(
+                                symbol="star",
+                                size=12,
+                                color="rgba(255,255,255,0.9)",
+                                line=dict(color="#c0392b", width=1.5),
+                            ),
+                            hovertemplate="%{text}<extra></extra>",
+                            text=hl_text,
+                            name="🔥 バーストピーク",
+                            showlegend=True,
+                        ))
+                        fig_heat.update_layout(
+                            legend=dict(x=1.01, y=1, bgcolor="rgba(255,255,255,0.8)",
+                                        bordercolor="#e3e8ee", borderwidth=1),
+                        )
+                        st.caption(
+                            f"★ = バースト検知されたMeSHのピーク年（{len(hl_x)}件検出・"
+                            f"Zスコア閾値={burst_z_th}）　ヒートマップにカーソルを当てると詳細が出ます"
+                        )
+
                 st.plotly_chart(fig_heat, use_container_width=True)
                 st.download_button("⬇️ ヒートマップデータ (CSV)",
                                    pivot_norm.T.reset_index().to_csv(index=False).encode(),
@@ -1299,7 +1562,15 @@ elif page == "🔥 ホットキーワード":
                 st.info("バーストが検出されませんでした。Zスコア閾値を小さくしてみてください。")
             else:
                 st.success(f"検出バースト数: {len(burst_df)} 件")
-                st.dataframe(burst_df, use_container_width=False)
+
+                # ── バースト検知 結果テーブル ──────────────────────────
+                st.markdown("##### バースト検知 結果一覧")
+                st.caption("バースト開始年が早い順・同一開始年はZスコア降順で表示")
+                st.dataframe(burst_df, use_container_width=False, hide_index=True)
+
+                # ── バースト検知 タイムライン ───────────────────────────
+                st.markdown("##### バースト検知 タイムライン")
+                st.caption("バーの長さ＝バースト継続期間　◆マーク＝ピーク年　色が濃いほどZスコアが高い")
                 fig_burst = go.Figure()
                 max_z = burst_df["最大Zスコア"].max()
                 cmap  = px.colors.sequential.YlOrRd
