@@ -324,20 +324,27 @@ def kwic_extract_single(doc_text: str, term_words: list, window: int = 7) -> str
 
 def build_kwic_map(group_docs: dict, top_n: int, max_hits: int = 2) -> dict:
     """
-    各グループの上位bigramについて、実際の文献から文脈（KWIC）を事前抽出する。
-    Returns: {group: {term: [context_str, ...]}}
+    TF-IDF上位語（tfidf_top()と同じ計算）を対象にKWICを抽出する。
+    旧版は「頻度Top(top_n×2)」でKWICを集めていたが、TF-IDF上位語は
+    「そのグループに特徴的だが全体頻度は低い語」が多いため
+    頻度ランキングでは漏れが71.7%に達していた。
+    修正後は tfidf_top() で確定した上位語のみを対象にする。
     """
+    # まず全グループのTF-IDF上位語を確定させる
+    group_texts_joined = {g: " ".join(docs) for g, docs in group_docs.items()}
+    tfidf_result = tfidf_top(group_texts_joined, top_n, mode="bigram")
+
     kwic_map = {}
     for g, docs in group_docs.items():
-        all_text = " ".join(docs)
-        bigrams  = Counter(make_bigrams(all_text))
-        top_terms = [t.replace("_", " ") for t, _ in bigrams.most_common(top_n * 2)]
         kwic_map[g] = {}
-        for term_display in top_terms[:top_n]:
+        # このグループのTF-IDF上位語を取得
+        group_terms = tfidf_result[tfidf_result["group"] == g]["term"].tolist()
+        for term_display in group_terms:
             term_words = term_display.lower().split()
             hits = []
             for doc in docs:
-                if not isinstance(doc, str): continue
+                if not isinstance(doc, str):
+                    continue
                 ctx = kwic_extract_single(doc, term_words)
                 if ctx:
                     hits.append(ctx)
@@ -1028,12 +1035,15 @@ if _base_df is not None and "AD" in _base_df.columns:
 
     # フィルタ適用
     if selected_country_filter != "すべて":
-        def _first_author_country_match(row, target):
+        _target = selected_country_filter   # lambda でキャプチャするためローカル変数に
+        def _match_country(row):
             ad = row.get("AD", [])
-            if not isinstance(ad, list): ad = [ad] if ad else []
-            return ad and extract_country(str(ad[0])) == target
-        mask = _base_df.apply(_first_author_country_match,
-                               axis=1, target=selected_country_filter)
+            if not isinstance(ad, list):
+                ad = [ad] if (ad and pd.notna(ad)) else []
+            if not ad:
+                return False
+            return extract_country(str(ad[0])) == _target
+        mask = _base_df.apply(_match_country, axis=1)
         df = _base_df[mask].copy()
     else:
         df = _base_df
