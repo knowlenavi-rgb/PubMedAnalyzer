@@ -833,19 +833,25 @@ def build_mesh_pivot(df: pd.DataFrame, top_n: int, min_year: int):
 def detect_bursts(mdf: pd.DataFrame, top_n: int, min_year: int, z_th: float):
     """
     改良版バースト検知:
-    - 対象MeSHをtop_n件（旧: top_n件のうち5件未満を除外）
-    - Zスコアが連続してz_th以上の年をひとまとめに「バースト期間」として記録
-    - 連続バースト年数も出力（示唆の深さの指標）
+    - Zスコアはmdf内の全年範囲（データの最初年〜）で計算する
+      （min_year以降で切り出すと、その期間だけで平均・分散が再計算されてしまい
+        単調増加中の語が「ずっと平均より多い」状態になってバーストを検出できない）
+    - バースト開始がmin_year以前のものは結果から除外する
+      （ヒートマップの表示範囲に合わせるため）
+    - min_total=5 以上の出現がある語のみ対象
     """
-    y_max = int(mdf["year"].max())
-    # min_total=5 以上の出現がある語のみ対象
+    if mdf.empty:
+        return pd.DataFrame()
+    y_min_data = int(mdf["year"].min())   # データの最初年（全期間でZを計算）
+    y_max      = int(mdf["year"].max())
     burst_mesh = (mdf["mesh"].value_counts()
                   .loc[lambda s: s >= 5]
                   .head(top_n).index.tolist())
     results = []
     for term in burst_mesh:
+        # 全年範囲でZスコアを計算
         series = (mdf[mdf["mesh"] == term].groupby("year").size()
-                  .reindex(range(min_year, y_max + 1), fill_value=0))
+                  .reindex(range(y_min_data, y_max + 1), fill_value=0))
         mean, std = series.mean(), series.std()
         if std == 0 or len(series) < 4:
             continue
@@ -856,27 +862,27 @@ def detect_bursts(mdf: pd.DataFrame, top_n: int, min_year: int, z_th: float):
                 in_b, b_start = True, yr_val
             elif zv < z_th and in_b:
                 slice_s = series[b_start:yr_val].dropna()
-                if not slice_s.empty:
+                if not slice_s.empty and b_start >= min_year:
                     results.append({
-                        "MeSH": term,
+                        "MeSH":       term,
                         "バースト開始": b_start,
                         "バースト終了": yr_val - 1,
-                        "期間": yr_val - b_start,
-                        "ピーク件数": int(slice_s.max()),
-                        "ピーク年": int(slice_s.idxmax()),
+                        "期間":        yr_val - b_start,
+                        "ピーク件数":  int(slice_s.max()),
+                        "ピーク年":    int(slice_s.idxmax()),
                         "最大Zスコア": round(float(z[b_start:yr_val].dropna().max()), 2),
                     })
                 in_b = False
         if in_b:
             slice_s = series[b_start:].dropna()
-            if not slice_s.empty:
+            if not slice_s.empty and b_start >= min_year:
                 results.append({
-                    "MeSH": term,
+                    "MeSH":       term,
                     "バースト開始": b_start,
                     "バースト終了": y_max,
-                    "期間": y_max - b_start + 1,
-                    "ピーク件数": int(slice_s.max()),
-                    "ピーク年": int(slice_s.idxmax()),
+                    "期間":        y_max - b_start + 1,
+                    "ピーク件数":  int(slice_s.max()),
+                    "ピーク年":    int(slice_s.idxmax()),
                     "最大Zスコア": round(float(z[b_start:].dropna().max()), 2),
                 })
     return (pd.DataFrame(results)
